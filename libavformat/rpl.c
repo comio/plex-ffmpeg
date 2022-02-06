@@ -33,7 +33,7 @@
 /** 256 is arbitrary, but should be big enough for any reasonable file. */
 #define RPL_LINE_LENGTH 256
 
-static int rpl_probe(AVProbeData *p)
+static int rpl_probe(const AVProbeData *p)
 {
     if (memcmp(p->buf, RPL_SIGNATURE, RPL_SIGNATURE_SIZE))
         return 0;
@@ -119,6 +119,8 @@ static int rpl_read_header(AVFormatContext *s)
     AVStream *vst = NULL, *ast = NULL;
     int total_audio_size;
     int error = 0;
+    const char *endptr;
+    char audio_type[RPL_LINE_LENGTH];
 
     uint32_t i;
 
@@ -170,8 +172,8 @@ static int rpl_read_header(AVFormatContext *s)
             vst->codecpar->codec_id = AV_CODEC_ID_ESCAPE130;
             break;
         default:
-            avpriv_report_missing_feature(s, "Video format %i",
-                                          vst->codecpar->codec_tag);
+            avpriv_report_missing_feature(s, "Video format %s",
+                                          av_fourcc2str(vst->codecpar->codec_tag));
             vst->codecpar->codec_id = AV_CODEC_ID_NONE;
     }
 
@@ -188,7 +190,9 @@ static int rpl_read_header(AVFormatContext *s)
         ast->codecpar->codec_tag       = audio_format;
         ast->codecpar->sample_rate     = read_line_and_int(pb, &error);  // audio bitrate
         ast->codecpar->channels        = read_line_and_int(pb, &error);  // number of audio channels
-        ast->codecpar->bits_per_coded_sample = read_line_and_int(pb, &error);  // audio bits per sample
+        error |= read_line(pb, line, sizeof(line));
+        ast->codecpar->bits_per_coded_sample = read_int(line, &endptr, &error);  // audio bits per sample
+        strcpy(audio_type, endptr);
         // At least one sample uses 0 for ADPCM, which is really 4 bits
         // per sample.
         if (ast->codecpar->bits_per_coded_sample == 0)
@@ -205,6 +209,17 @@ static int rpl_read_header(AVFormatContext *s)
                     // 16-bit audio is always signed
                     ast->codecpar->codec_id = AV_CODEC_ID_PCM_S16LE;
                     break;
+                } else if (ast->codecpar->bits_per_coded_sample == 8) {
+                    if(strstr(audio_type, "unsigned") != NULL) {
+                        ast->codecpar->codec_id = AV_CODEC_ID_PCM_U8;
+                        break;
+                    } else if(strstr(audio_type, "linear") != NULL) {
+                        ast->codecpar->codec_id = AV_CODEC_ID_PCM_S8;
+                        break;
+                    } else {
+                        ast->codecpar->codec_id = AV_CODEC_ID_PCM_VIDC;
+                        break;
+                    }
                 }
                 // There are some other formats listed as legal per the spec;
                 // samples needed.
@@ -233,8 +248,8 @@ static int rpl_read_header(AVFormatContext *s)
     rpl->frames_per_chunk = read_line_and_int(pb, &error);  // video frames per chunk
     if (rpl->frames_per_chunk > 1 && vst->codecpar->codec_tag != 124)
         av_log(s, AV_LOG_WARNING,
-               "Don't know how to split frames for video format %i. "
-               "Video stream will be broken!\n", vst->codecpar->codec_tag);
+               "Don't know how to split frames for video format %s. "
+               "Video stream will be broken!\n", av_fourcc2str(vst->codecpar->codec_tag));
 
     number_of_chunks = read_line_and_int(pb, &error);  // number of chunks in the file
     // The number in the header is actually the index of the last chunk.

@@ -21,8 +21,6 @@
 #include "mf_utils.h"
 
 // Include after mf_utils.h due to Windows include mess.
-#include "libavutil/hwcontext.h"
-#include "libavutil/hwcontext_mf.h"
 #include "mpeg4audio.h"
 
 // Used to destroy the decoder once the last frame reference has been
@@ -226,7 +224,7 @@ static int mf_decv_output_type_get(AVCodecContext *avctx, IMFMediaType *type)
     int ret;
 
     c->sw_format = ff_media_type_to_pix_fmt((IMFAttributes *)type);
-    avctx->pix_fmt = c->use_opaque ? AV_PIX_FMT_MF : c->sw_format;
+//    avctx->pix_fmt = c->use_opaque ? AV_PIX_FMT_MF : c->sw_format;
 
     hr = ff_MFGetAttributeSize((IMFAttributes *)type, &MF_MT_FRAME_SIZE, &cw, &ch);
     if (FAILED(hr))
@@ -315,7 +313,7 @@ static int mf_decv_output_type_get(AVCodecContext *avctx, IMFMediaType *type)
     if (!c->frames_ref)
         return AVERROR(ENOMEM);
     frames_context = (void *)c->frames_ref->data;
-    frames_context->format = AV_PIX_FMT_MF;
+//    frames_context->format = AV_PIX_FMT_MF;
     frames_context->width = cw;
     frames_context->height = ch;
     frames_context->sw_format = c->sw_format;
@@ -501,14 +499,14 @@ static int mf_sample_to_v_avframe(AVCodecContext *avctx, IMFSample *sample, AVFr
 
     mf_frame->width = avctx->width;
     mf_frame->height = avctx->height;
-    mf_frame->format = AV_PIX_FMT_MF;
+//    mf_frame->format = AV_PIX_FMT_MF;
     mf_frame->data[3] = (void *)sample;
 
     if ((ret = ff_decode_frame_props(avctx, mf_frame)) < 0)
         return ret;
 
     // ff_decode_frame_props() overwites this
-    mf_frame->format = AV_PIX_FMT_MF;
+//    mf_frame->format = AV_PIX_FMT_MF;
 
     mf_frame->hw_frames_ctx = av_buffer_ref(c->frames_ref);
     if (!mf_frame->hw_frames_ctx)
@@ -573,6 +571,7 @@ static int mf_sample_to_avframe(AVCodecContext *avctx, IMFSample *sample, AVFram
 
 static int mf_sample_to_avpacket(AVCodecContext *avctx, IMFSample *sample, AVPacket *avpkt)
 {
+    MFContext *c = avctx->priv_data;
     HRESULT hr;
     int ret;
     DWORD len;
@@ -606,7 +605,7 @@ static int mf_sample_to_avpacket(AVCodecContext *avctx, IMFSample *sample, AVPac
     avpkt->pts = avpkt->dts = mf_sample_get_pts(avctx, sample);
 
     hr = IMFAttributes_GetUINT32(sample, &MFSampleExtension_CleanPoint, &t32);
-    if (!FAILED(hr) && t32 != 0)
+    if (c->is_audio || (!FAILED(hr) && t32 != 0))
         avpkt->flags |= AV_PKT_FLAG_KEY;
 
     hr = IMFAttributes_GetUINT64(sample, &MFSampleExtension_DecodeTimestamp, &t);
@@ -765,7 +764,6 @@ static int mf_send_packet(AVCodecContext *avctx, const AVPacket *avpkt)
     ret = mf_send_sample(avctx, sample);
     if (sample)
         IMFSample_Release(sample);
-    emms_c();
     return ret;
 }
 
@@ -778,72 +776,68 @@ static int mf_receive_sample(AVCodecContext *avctx, IMFSample **out_sample)
     IMFSample *sample;
     int ret = 0;
 
-again:
-    *out_sample = NULL;
-    sample = NULL;
+    while (1) {
+        *out_sample = NULL;
+        sample = NULL;
 
-    if (c->async_events) {
-        if ((ret = mf_wait_events(avctx)) < 0)
-            return ret;
-        if (!c->async_have_output || c->draining_done) {
-            ret = 0;
-            goto done;
-        }
-    }
-
-    if (!c->out_stream_provides_samples) {
-        sample = ff_create_memory_sample(NULL, c->out_info.cbSize, c->out_info.cbAlignment);
-        if (!sample)
-            return AVERROR(ENOMEM);
-    }
-
-    out_buffers = (MFT_OUTPUT_DATA_BUFFER) {
-        .dwStreamID = c->out_stream_id,
-        .pSample = sample,
-    };
-
-    st = 0;
-    hr = IMFTransform_ProcessOutput(c->mft, 0, 1, &out_buffers, &st);
-    if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
-        if (c->draining)
-            c->draining_done = 1;
-        ret = 0;
-        goto done;
-    } else if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
-        av_log(avctx,  AV_LOG_WARNING, "stream format change\n");
-        ret = mf_choose_output_type(avctx);
-        if (ret == 0) // we don't expect renegotiating the input type
-            ret = AVERROR_EXTERNAL;
-        if (ret > 0) {
-            ret = mf_setup_context(avctx);
-            if (ret >= 0) {
-                if (out_buffers.pSample)
-                    IMFSample_Release(out_buffers.pSample);
-                c->async_have_output = 0;
-                goto again;
+        if (c->async_events) {
+            if ((ret = mf_wait_events(avctx)) < 0)
+                return ret;
+            if (!c->async_have_output || c->draining_done) {
+                ret = 0;
+                break;
             }
         }
-    } else if (hr == MF_E_TRANSFORM_TYPE_NOT_SET) {
-        av_log(avctx, AV_LOG_ERROR, "type not set\n");
-        ret = AVERROR_EXTERNAL;
-    } else if (FAILED(hr)) {
-        av_log(avctx, AV_LOG_ERROR, "failed processing output: %s\n", ff_hr_str(hr));
-        ret = AVERROR_EXTERNAL;
-    } else {
+
+        if (!c->out_stream_provides_samples) {
+            sample = ff_create_memory_sample(NULL, c->out_info.cbSize, c->out_info.cbAlignment);
+            if (!sample)
+                return AVERROR(ENOMEM);
+        }
+
+        out_buffers = (MFT_OUTPUT_DATA_BUFFER) {
+            .dwStreamID = c->out_stream_id,
+            .pSample = sample,
+        };
+
+        st = 0;
+        hr = IMFTransform_ProcessOutput(c->mft, 0, 1, &out_buffers, &st);
+
         if (out_buffers.pEvents)
             IMFCollection_Release(out_buffers.pEvents);
 
-        *out_sample = out_buffers.pSample;
-        out_buffers.pSample = NULL;
-        ret = 0;
+        if (!FAILED(hr)) {
+            *out_sample = out_buffers.pSample;
+            ret = 0;
+            break;
+        }
+
+        if (out_buffers.pSample)
+            IMFSample_Release(out_buffers.pSample);
+
+        if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+            if (c->draining)
+                c->draining_done = 1;
+            ret = 0;
+        } else if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
+            av_log(avctx,  AV_LOG_WARNING, "stream format change\n");
+            ret = mf_choose_output_type(avctx);
+            if (ret == 0) // we don't expect renegotiating the input type
+                ret = AVERROR_EXTERNAL;
+            if (ret > 0) {
+                ret = mf_setup_context(avctx);
+                if (ret >= 0) {
+                    c->async_have_output = 0;
+                    continue;
+                }
+            }
+        } else {
+            av_log(avctx, AV_LOG_ERROR, "failed processing output: %s\n", ff_hr_str(hr));
+            ret = AVERROR_EXTERNAL;
+        }
+
+        break;
     }
-
-    if (out_buffers.pSample)
-        IMFSample_Release(out_buffers.pSample);
-
-    emms_c();
-
-done:
 
     c->async_have_output = 0;
 
@@ -1592,6 +1586,7 @@ static int mf_setup_context(AVCodecContext *avctx)
     return 0;
 }
 
+/*
 static int mf_init_hwaccel(AVCodecContext *avctx)
 {
     MFContext *c = avctx->priv_data;
@@ -1704,6 +1699,7 @@ static int mf_init_hwaccel(AVCodecContext *avctx)
 
     return 0;
 }
+*/
 
 static LONG mf_codecapi_get_int(ICodecAPI *capi, const GUID *guid, LONG def)
 {
@@ -1940,8 +1936,8 @@ static int mf_init(AVCodecContext *avctx)
         }
     }
 
-    if (c->is_video && ((ret = mf_init_hwaccel(avctx)) < 0))
-        return ret;
+//    if (c->is_video && ((ret = mf_init_hwaccel(avctx)) < 0))
+//        return ret;
 
     if ((ret = mf_check_codec_requirements(avctx)) < 0)
         return ret;
@@ -2042,7 +2038,7 @@ static int mf_probe(struct AVCodec *codec)
         .send_packet    = mf_send_packet,                                      \
         .receive_frame  = mf_receive_frame,                                    \
         .flush          = mf_flush,                                            \
-        .capabilities   = AV_CODEC_CAP_DELAY,                                  \
+        .capabilities   = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_AVOID_PROBING,     \
         .caps_internal  = FF_CODEC_CAP_SETS_PKT_DTS |                          \
                           FF_CODEC_CAP_INIT_THREADSAFE |                       \
                           FF_CODEC_CAP_INIT_CLEANUP,                           \
@@ -2063,11 +2059,11 @@ MF_DECODER(AUDIO, wmavoice,    WMAVOICE,        NULL);
 #define VD AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_DECODING_PARAM
 static const AVOption vdec_opts[] = {
     // Only used for non-opaque output (otherwise, the AVHWDeviceContext matters)
-    {"use_d3d",       "D3D decoding mode", OFFSET(opt_use_d3d), AV_OPT_TYPE_INT, {.i64 = AV_MF_NONE}, 0, INT_MAX, VD, "use_d3d"},
+/*    {"use_d3d",       "D3D decoding mode", OFFSET(opt_use_d3d), AV_OPT_TYPE_INT, {.i64 = AV_MF_NONE}, 0, INT_MAX, VD, "use_d3d"},
     { "auto",         "Any (or none) D3D mode", 0, AV_OPT_TYPE_CONST, {.i64 = AV_MF_AUTO}, 0, 0, VD, "use_d3d"},
     { "none",         "Disable D3D mode", 0, AV_OPT_TYPE_CONST, {.i64 = AV_MF_NONE}, 0, 0, VD, "use_d3d"},
     { "d3d9",         "D3D9 decoding", 0, AV_OPT_TYPE_CONST, {.i64 = AV_MF_D3D9}, 0, 0, VD, "use_d3d"},
-    { "d3d11",        "D3D11 decoding", 0, AV_OPT_TYPE_CONST, {.i64 = AV_MF_D3D11}, 0, 0, VD, "use_d3d"},
+    { "d3d11",        "D3D11 decoding", 0, AV_OPT_TYPE_CONST, {.i64 = AV_MF_D3D11}, 0, 0, VD, "use_d3d"},*/
     // Can be used to fail early if no hwaccel is available
     {"require_d3d",   "Fail init if D3D cannot be used", OFFSET(opt_require_d3d), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 1, VD},
     // Experimenting with h264/d3d11 shows: allocated_textures = MIN(out_samples, 5) + 18
@@ -2080,13 +2076,16 @@ static const AVOption vdec_opts[] = {
 };
 
 #define MF_VIDEO_DECODER(NAME, ID) \
+    MF_DECODER(VIDEO, NAME, ID, vdec_opts);
+
+/*
     AVHWAccel ff_ ## NAME ## _mf_hwaccel = {                                   \
         .name       = #NAME "_mf",                                             \
         .type       = AVMEDIA_TYPE_VIDEO,                                      \
         .id         = AV_CODEC_ID_ ## ID,                                      \
         .pix_fmt    = AV_PIX_FMT_MF,                                           \
     };                                                                         \
-    MF_DECODER(VIDEO, NAME, ID, vdec_opts);
+*/
 
 MF_VIDEO_DECODER(h264,         H264);
 MF_VIDEO_DECODER(hevc,         HEVC);

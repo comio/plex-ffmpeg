@@ -266,6 +266,11 @@ int av_strcasecmp(const char *a, const char *b);
  */
 int av_strncasecmp(const char *a, const char *b, size_t n);
 
+/**
+ * Locale-independent strings replace.
+ * @note This means only ASCII-range characters are replace
+ */
+char *av_strireplace(const char *str, const char *from, const char *to);
 
 /**
  * Thread safe basename.
@@ -309,6 +314,8 @@ enum AVEscapeMode {
     AV_ESCAPE_MODE_AUTO,      ///< Use auto-selected escaping mode.
     AV_ESCAPE_MODE_BACKSLASH, ///< Use backslash escaping.
     AV_ESCAPE_MODE_QUOTE,     ///< Use single-quote escaping.
+    AV_ESCAPE_MODE_XML,       ///< Use XML ampersand-escaping; requires UTF-8 input.
+    AV_ESCAPE_MODE_URL,       ///< Use URL percent-escaping
 };
 
 /**
@@ -327,6 +334,33 @@ enum AVEscapeMode {
  * special by av_get_token(), such as the single quote.
  */
 #define AV_ESCAPE_FLAG_STRICT (1 << 1)
+
+/**
+ * In addition to the provided list, escape all characters outside the range of
+ * U+0020 to U+007E.
+ * This only applies to XML-escaping.
+ */
+#define AV_ESCAPE_FLAG_NON_ASCII (1 << 2)
+
+/**
+ * In addition to the provided list, escape single or double quotes.
+ * This only applies to XML-escaping.
+ */
+#define AV_ESCAPE_FLAG_ESCAPE_SINGLE_QUOTE (1 << 3)
+#define AV_ESCAPE_FLAG_ESCAPE_DOUBLE_QUOTE (1 << 4)
+
+/**
+ * Replace invalid UTF-8 characters with a U+FFFD REPLACEMENT CHARACTER, escaped
+ * if AV_ESCAPE_FLAG_NON_ASCII is set.
+ * This only applies to XML-escaping.
+ */
+#define AV_ESCAPE_FLAG_REPLACE_INVALID_SEQUENCES (1 << 5)
+
+/**
+ * Replace invalid UTF-8 characters with a '?', overriding the previous flag.
+ * This only applies to XML-escaping.
+ */
+#define AV_ESCAPE_FLAG_REPLACE_INVALID_ASCII (1 << 6)
 
 /**
  * Escape string in src, and put the escaped string in an allocated
@@ -394,6 +428,12 @@ int av_utf8_decode(int32_t *codep, const uint8_t **bufp, const uint8_t *buf_end,
  *            list.
  */
 int av_match_list(const char *name, const char *list, char separator);
+
+/**
+ * See libc sscanf manual for more information.
+ * Locale-independent sscanf implementation.
+ */
+int av_sscanf(const char *string, const char *format, ...);
 
 /**
  * @}

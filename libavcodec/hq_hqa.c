@@ -68,11 +68,11 @@ static int hq_decode_block(HQContext *c, GetBitContext *gb, int16_t block[64],
     memset(block, 0, 64 * sizeof(*block));
 
     if (!is_hqa) {
-        block[0] = get_sbits(gb, 9) << 6;
+        block[0] = get_sbits(gb, 9) * 64;
         q = ff_hq_quants[qsel][is_chroma][get_bits(gb, 2)];
     } else {
         q = ff_hq_quants[qsel][is_chroma][get_bits(gb, 2)];
-        block[0] = get_sbits(gb, 9) << 6;
+        block[0] = get_sbits(gb, 9) * 64;
     }
 
     for (;;) {
@@ -83,7 +83,7 @@ static int hq_decode_block(HQContext *c, GetBitContext *gb, int16_t block[64],
         pos += ff_hq_ac_skips[val];
         if (pos >= 64)
             break;
-        block[ff_zigzag_direct[pos]] = (ff_hq_ac_syms[val] * q[pos]) >> 12;
+        block[ff_zigzag_direct[pos]] = (int)(ff_hq_ac_syms[val] * (unsigned)q[pos]) >> 12;
         pos++;
     }
 
@@ -180,6 +180,9 @@ static int hqa_decode_mb(HQContext *c, AVFrame *pic, int qgroup,
 {
     int flag = 0;
     int i, ret, cbp;
+
+    if (get_bits_left(gb) < 1)
+        return AVERROR_INVALIDDATA;
 
     cbp = get_vlc2(gb, c->hqa_cbp_vlc.table, 5, 1);
 

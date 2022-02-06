@@ -25,7 +25,7 @@
 #include "internal.h"
 #include "rawdec.h"
 
-static int wsd_probe(AVProbeData *p)
+static int wsd_probe(const AVProbeData *p)
 {
     if (p->buf_size < 45 || memcmp(p->buf, "1bit", 4) ||
         !AV_RB32(p->buf + 36) || !p->buf[44] ||
@@ -128,7 +128,7 @@ static int wsd_read_header(AVFormatContext *s)
     st->codecpar->sample_rate = avio_rb32(pb) / 8;
     avio_skip(pb, 4);
     st->codecpar->channels    = avio_r8(pb) & 0xF;
-    st->codecpar->bit_rate    = st->codecpar->channels * st->codecpar->sample_rate * 8LL;
+    st->codecpar->bit_rate    = (int64_t)st->codecpar->channels * st->codecpar->sample_rate * 8LL;
     if (!st->codecpar->channels)
         return AVERROR_INVALIDDATA;
 

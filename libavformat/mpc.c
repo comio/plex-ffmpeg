@@ -45,7 +45,7 @@ typedef struct MPCContext {
     int frames_noted;
 } MPCContext;
 
-static int mpc_probe(AVProbeData *p)
+static int mpc_probe(const AVProbeData *p)
 {
     const uint8_t *d = p->buf;
     if (d[0] == 'M' && d[1] == 'P' && d[2] == '+' && (d[3] == 0x17 || d[3] == 0x7))
@@ -104,7 +104,7 @@ static int mpc_read_header(AVFormatContext *s)
     st->duration = c->fcount;
 
     /* try to read APE tags */
-    if (s->pb->seekable) {
+    if (s->pb->seekable & AVIO_SEEKABLE_NORMAL) {
         int64_t pos = avio_tell(s->pb);
         ff_ape_parse_tag(s);
         if (!av_dict_get(s->metadata, "", NULL, AV_DICT_IGNORE_SUFFIX))

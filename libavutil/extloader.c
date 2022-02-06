@@ -50,23 +50,6 @@ static const char *win_error(char* buf, int size)
     return buf;
 }
 #define dlerror() win_error((char[1024]){0}, 1024)
-static char *ff_getenv(const char *name)
-{
-    size_t max = 32767; // documented maximum
-    wchar_t *wenv = av_mallocz_array(max + 1, sizeof(wchar_t));
-    wchar_t *wname;
-    char *env = NULL;
-    (void)utf8towchar(name, &wname);
-    if (!wenv || !wname)
-        goto done;
-    if (!GetEnvironmentVariableW(wname, wenv, max))
-        goto done;
-    (void)wchartoutf8(wenv, &env);
-done:
-    av_free(wenv);
-    av_free(wname);
-    return env;
-}
 struct ff_dirent {
     char *d_name;
 };
@@ -129,11 +112,6 @@ static int ff_closedir(ff_DIR *dirp)
 #define DL_OPEN_FUNC(l) dlopen(l, RTLD_NOW | RTLD_LOCAL)
 #define DL_LOAD_FUNC(l, s) dlsym(l, s)
 #define DL_CLOSE_FUNC(l) dlclose(l)
-static char *ff_getenv(const char *name)
-{
-    char *env = getenv(name);
-    return env ? av_strdup(env) : NULL;
-}
 #define ff_DIR DIR
 #define ff_dirent dirent
 #define ff_opendir opendir
@@ -186,8 +164,10 @@ static void load_dsos_from_directory(FFLibrary* lib, const char *path)
     struct ff_dirent *entry;
 
     dir = ff_opendir(path);
-    if (!dir)
+    if (!dir) {
+        av_log(NULL, AV_LOG_ERROR, "Could not open directory '%s'\n", path);
         return;
+    }
 
     while ((entry = ff_readdir(dir))) {
         char *dso = entry->d_name;
@@ -225,23 +205,51 @@ static void ff_unlock_lib(FFLibrary* lib)
     pthread_mutex_unlock(&lib_lock);
 }
 
+static int needs_rescan = 1;
+int ff_is_master = 1;
+static char *set_paths = NULL;
+
+void av_set_extlibs_path(const char *inp)
+{
+    ff_lock_lib(NULL);
+    av_freep(&set_paths);
+    set_paths = av_strdup(inp);
+    needs_rescan = 1;
+    ff_unlock_lib(NULL);
+}
+
+void av_set_needs_rescan(void)
+{
+    ff_lock_lib(NULL);
+    needs_rescan = 1;
+    ff_unlock_lib(NULL);
+}
+
 // Goes through FFMPEG_EXTERNAL_LIBS and loads the libs there.
 // Uses ff_library to add them to the internal state.
 void avpriv_load_new_libs(FFLibrary* lib)
 {
-    char *paths_env;
     const char *paths;
     const char *cur = NULL;
 
     // Never load external libs from leaf libs.
-    if (!lib->is_master)
-        return;
-
-    paths = paths_env = ff_getenv("FFMPEG_EXTERNAL_LIBS");
-    if (!paths)
+    if (!ff_is_master)
         return;
 
     ff_lock_lib(lib);
+
+    if (!needs_rescan)
+        goto skip;
+
+    if (!set_paths)
+        set_paths = ff_getenv("FFMPEG_EXTERNAL_LIBS");
+
+    paths = set_paths;
+
+    if (!paths)
+        goto skip;
+
+    needs_rescan = 0;
 
     av_log(NULL, AV_LOG_VERBOSE, "Rescanning for external libs: '%s'\n", paths);
 
@@ -258,7 +266,6 @@ void avpriv_load_new_libs(FFLibrary* lib)
         av_freep(&cur);
     }
 
-    av_free(paths_env);
-
+skip:
     ff_unlock_lib(lib);
 }

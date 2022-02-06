@@ -27,8 +27,8 @@
 
 void avfilter_inlineass_process_header(AVFilterContext *link,
                                        AVCodecContext *dec_ctx);
-void avfilter_inlineass_append_data(AVFilterContext *link, AVStream *stream,
-                                    AVPacket *pkt);
+void avfilter_inlineass_append_data(AVFilterContext *link, AVCodecContext *dec_ctx,
+                                    AVSubtitle *sub);
 void avfilter_inlineass_set_aspect_ratio(AVFilterContext *context, double dar);
 void avfilter_inlineass_add_attachment(AVFilterContext *context, AVStream *st);
 void avfilter_inlineass_set_fonts(AVFilterContext *context);

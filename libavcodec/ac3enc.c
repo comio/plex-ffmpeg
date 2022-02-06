@@ -44,7 +44,9 @@
 #include "ac3.h"
 #include "fft.h"
 #include "ac3enc.h"
+#if CONFIG_EAC3_ENCODER
 #include "eac3enc.h"
+#endif
 
 typedef struct AC3Mant {
     int16_t *qmant1_ptr, *qmant2_ptr, *qmant4_ptr; ///< mantissa pointers for bap=1,2,4
@@ -317,8 +319,10 @@ static av_cold void exponent_init(AC3EncodeContext *s)
     /* LFE */
     exponent_group_tab[0][0][7] = 2;
 
+#if CONFIG_EAC3_ENCODER
     if (CONFIG_EAC3_ENCODER && s->eac3)
         ff_eac3_exponent_init();
+#endif
 }
 
 
@@ -407,9 +411,11 @@ static void compute_exp_strategy(AC3EncodeContext *s)
             s->exp_strategy[ch][blk] = EXP_REUSE;
     }
 
+#if CONFIG_EAC3_ENCODER
     /* for E-AC-3, determine frame exponent strategy */
     if (CONFIG_EAC3_ENCODER && s->eac3)
         ff_eac3_get_frame_exp_strategy(s);
+#endif
 }
 
 
@@ -668,6 +674,7 @@ static void count_frame_bits_fixed(AC3EncodeContext *s)
     /* header */
     frame_bits = 16; /* sync info */
     if (s->eac3) {
+#if CONFIG_EAC3_ENCODER
         /* bitstream info header */
         frame_bits += 35;
         frame_bits += 1 + 1;
@@ -695,6 +702,7 @@ static void count_frame_bits_fixed(AC3EncodeContext *s)
         /* block start info */
         if (s->num_blocks != 1)
             frame_bits++;
+#endif
     } else {
         frame_bits += 49;
         frame_bits += frame_bits_inc[s->channel_mode];
@@ -800,6 +808,7 @@ static void count_frame_bits(AC3EncodeContext *s)
 
     /* header */
     if (s->eac3) {
+#if CONFIG_EAC3_ENCODER
         if (opt->eac3_mixing_metadata) {
             if (s->channel_mode > AC3_CHMODE_STEREO)
                 frame_bits += 2;
@@ -843,6 +852,7 @@ static void count_frame_bits(AC3EncodeContext *s)
                     frame_bits += 2 * s->blocks[blk].cpl_in_use;
             }
         }
+#endif
     } else {
         if (opt->audio_production_info)
             frame_bits += 7;
@@ -1800,7 +1810,7 @@ static int validate_float_option(float v, const float *v_list, int v_list_size)
             break;
     }
     if (i == v_list_size)
-        return -1;
+        return AVERROR(EINVAL);
 
     return i;
 }
@@ -2153,6 +2163,7 @@ static av_cold int validate_options(AC3EncodeContext *s)
 
     /* validate bit rate */
     if (s->eac3) {
+#if CONFIG_EAC3_ENCODER
         int max_br, min_br, wpf, min_br_code;
         int num_blks_code, num_blocks, frame_samples;
         long long min_br_dist;
@@ -2199,6 +2210,7 @@ static av_cold int validate_options(AC3EncodeContext *s)
         while (wpf > 1 && wpf * s->sample_rate / AC3_FRAME_SIZE * 16 > avctx->bit_rate)
             wpf--;
         s->frame_size_min = 2 * wpf;
+#endif
     } else {
         int best_br = 0, best_code = 0;
         long long best_diff = INT64_MAX;
@@ -2429,7 +2441,9 @@ av_cold int ff_ac3_encode_init(AVCodecContext *avctx)
 
     s->avctx = avctx;
 
+#if CONFIG_EAC3_ENCODER
     s->eac3 = avctx->codec_id == AV_CODEC_ID_EAC3;
+#endif
 
     ret = validate_options(s);
     if (ret)
@@ -2463,9 +2477,11 @@ av_cold int ff_ac3_encode_init(AVCodecContext *avctx)
         s->mdct_init                    = ff_ac3_float_mdct_init;
         s->allocate_sample_buffers      = ff_ac3_float_allocate_sample_buffers;
     }
+#if CONFIG_EAC3_ENCODER
     if (CONFIG_EAC3_ENCODER && s->eac3)
         s->output_frame_header = ff_eac3_output_frame_header;
     else
+#endif
         s->output_frame_header = ac3_output_frame_header;
 
     set_bandwidth(s);

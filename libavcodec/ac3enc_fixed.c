@@ -31,7 +31,9 @@
 #include "internal.h"
 #include "audiodsp.h"
 #include "ac3enc.h"
+#if CONFIG_EAC3_ENCODER
 #include "eac3enc.h"
+#endif
 
 #define AC3ENC_TYPE AC3ENC_TYPE_AC3_FIXED
 #include "ac3enc_opts_template.c"
@@ -42,34 +44,6 @@ static const AVClass ac3enc_class = {
     .option     = ac3_options,
     .version    = LIBAVUTIL_VERSION_INT,
 };
-
-#include "ac3enc_template.c"
-
-
-/**
- * Finalize MDCT and free allocated memory.
- *
- * @param s  AC-3 encoder private context
- */
-av_cold void AC3_NAME(mdct_end)(AC3EncodeContext *s)
-{
-    ff_mdct_end(&s->mdct);
-}
-
-
-/**
- * Initialize MDCT tables.
- *
- * @param s  AC-3 encoder private context
- * @return   0 on success, negative error code on failure
- */
-av_cold int AC3_NAME(mdct_init)(AC3EncodeContext *s)
-{
-    int ret = ff_mdct_init(&s->mdct, 9, 0, -1.0);
-    s->mdct_window = ff_ac3_window;
-    return ret;
-}
-
 
 /*
  * Normalize the input samples to use the maximum available precision.
@@ -132,6 +106,34 @@ static CoefType calc_cpl_coord(CoefSumType energy_ch, CoefSumType energy_cpl)
         coord32          = ff_sqrt(coord32) << 9;
         return FFMIN(coord32, COEF_MAX);
     }
+}
+
+
+#include "ac3enc_template.c"
+
+
+/**
+ * Finalize MDCT and free allocated memory.
+ *
+ * @param s  AC-3 encoder private context
+ */
+av_cold void ff_ac3_fixed_mdct_end(AC3EncodeContext *s)
+{
+    ff_mdct_end(&s->mdct);
+}
+
+
+/**
+ * Initialize MDCT tables.
+ *
+ * @param s  AC-3 encoder private context
+ * @return   0 on success, negative error code on failure
+ */
+av_cold int ff_ac3_fixed_mdct_init(AC3EncodeContext *s)
+{
+    int ret = ff_mdct_init(&s->mdct, 9, 0, -1.0);
+    s->mdct_window = ff_ac3_window;
+    return ret;
 }
 
 

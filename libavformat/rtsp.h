@@ -42,6 +42,7 @@ enum RTSPLowerTransport {
     RTSP_LOWER_TRANSPORT_HTTP = 8,          /**< HTTP tunneled - not a proper
                                                  transport mode as such,
                                                  only for use via AVOptions */
+    RTSP_LOWER_TRANSPORT_HTTPS,             /**< HTTPS tunneled */
     RTSP_LOWER_TRANSPORT_CUSTOM = 16,       /**< Custom IO - not a public
                                                  option for lower_transport_mask,
                                                  but set in the SDP demuxer based
@@ -352,6 +353,7 @@ typedef struct RTSPState {
      * Polling array for udp
      */
     struct pollfd *p;
+    int max_p;
 
     /**
      * Whether the server supports the GET_PARAMETER method.
@@ -457,7 +459,7 @@ typedef struct RTSPStream {
     /** The following are used for dynamic protocols (rtpdec_*.c/rdt.c) */
     //@{
     /** handler structure */
-    RTPDynamicProtocolHandler *dynamic_handler;
+    const RTPDynamicProtocolHandler *dynamic_handler;
 
     /** private data associated with the dynamic protocol */
     PayloadContext *dynamic_protocol_context;

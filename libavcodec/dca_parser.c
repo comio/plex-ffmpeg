@@ -27,6 +27,7 @@
 #include "dca_core.h"
 #include "dca_exss.h"
 #include "dca_xll.h"
+#include "dca_lbr.h"
 #include "dca_syncwords.h"
 #include "get_bits.h"
 #include "parser.h"
@@ -132,13 +133,13 @@ static int dca_find_frame_end(DCAParseContext *pc1, const uint8_t *buf,
                     break;
                 case DCA_SYNCWORD_CORE_14B_BE:
                     if (size == 4) {
-                        pc1->framesize = CORE_FRAMESIZE(STATE_14(state)) * 8 / 14 * 2;
+                        pc1->framesize = CORE_FRAMESIZE(STATE_14(state));
                         start_found    = 4;
                     }
                     break;
                 case DCA_SYNCWORD_CORE_14B_LE:
                     if (size == 4) {
-                        pc1->framesize = CORE_FRAMESIZE(STATE_14(STATE_LE(state))) * 8 / 14 * 2;
+                        pc1->framesize = CORE_FRAMESIZE(STATE_14(STATE_LE(state)));
                         start_found    = 4;
                     }
                     break;
@@ -192,6 +193,8 @@ static int dca_find_frame_end(DCAParseContext *pc1, const uint8_t *buf,
 static av_cold int dca_parse_init(AVCodecParserContext *s)
 {
     DCAParseContext *pc1 = s->priv_data;
+
+    s->flags |= PARSER_FLAG_ONCE; //PLEX
 
     pc1->lastmarker = 0;
     pc1->sr_code = -1;
@@ -262,21 +265,26 @@ static void parse_xxch_frame(GetBitContext *gb, int *mask)
     *mask |= get_bits_long(gb, xxch_mask_nbits - DCA_SPEAKER_Cs) << DCA_SPEAKER_Cs;
 }
 
-static int dca_parse_params(DCAParseContext *pc1, AVCodecContext *avctx,
-                            const uint8_t *buf, int buf_size, int *duration,
-                            int *sample_rate)
+static int dca_parse_params(DCAParseContext *pc1, AVCodecContext *avctx, const uint8_t *buf,
+                            int buf_size, int *duration, int *sample_rate,
+                            int *profile)
 {
+    DCAExssAsset *asset = &pc1->exss.assets[0];
     GetBitContext gb;
-    uint8_t hdr[12 + AV_INPUT_BUFFER_PADDING_SIZE] = { 0 };
-    int ret, sample_blocks, audio_mode, ch_mask, frame_size;
-    int ext_audio_type, ext_audio_present;
+    DCACoreFrameHeader h;
+    uint8_t hdr[DCA_CORE_FRAME_HEADER_SIZE + AV_INPUT_BUFFER_PADDING_SIZE] = { 0 };
+    int ret, frame_size;
 
-    if (buf_size < 16)
+    //PLEX
+    int ch_mask = 0;
+    const uint8_t *input = buf;
+    int input_size = buf_size;
+    //PLEX
+
+    if (buf_size < DCA_CORE_FRAME_HEADER_SIZE)
         return AVERROR_INVALIDDATA;
 
     if (AV_RB32(buf) == DCA_SYNCWORD_SUBSTREAM) {
-        DCAExssAsset *asset = &pc1->exss.assets[0];
-
         if ((ret = ff_dca_exss_parse(&pc1->exss, buf, buf_size)) < 0)
             return ret;
 
@@ -288,9 +296,9 @@ static int dca_parse_params(DCAParseContext *pc1, AVCodecContext *avctx,
                 return AVERROR_INVALIDDATA;
 
             switch (get_bits(&gb, 8)) {
-            case 2:
+            case DCA_LBR_HEADER_DECODER_INIT:
                 pc1->sr_code = get_bits(&gb, 8);
-            case 1:
+            case DCA_LBR_HEADER_SYNC_ONLY:
                 break;
             default:
                 return AVERROR_INVALIDDATA;
@@ -301,7 +309,8 @@ static int dca_parse_params(DCAParseContext *pc1, AVCodecContext *avctx,
 
             *sample_rate = ff_dca_sampling_freqs[pc1->sr_code];
             *duration = 1024 << ff_dca_freq_ranges[pc1->sr_code];
-            goto parse_full;
+            *profile = FF_PROFILE_DTS_EXPRESS;
+            goto parse_full; //PLEX
         }
 
         if (asset->extension_mask & DCA_EXSS_XLL) {
@@ -325,78 +334,92 @@ static int dca_parse_params(DCAParseContext *pc1, AVCodecContext *avctx,
 
             *sample_rate = asset->max_sample_rate;
             *duration = (1 + (*sample_rate > 96000)) << nsamples_log2;
-            goto parse_full;
+            *profile = FF_PROFILE_DTS_HD_MA;
+            goto parse_full; //PLEX
         }
 
         return AVERROR_INVALIDDATA;
     }
 
-    if ((ret = avpriv_dca_convert_bitstream(buf, 12, hdr, 12)) < 0)
+    if ((ret = avpriv_dca_convert_bitstream(buf, DCA_CORE_FRAME_HEADER_SIZE,
+                                            hdr, DCA_CORE_FRAME_HEADER_SIZE)) < 0)
         return ret;
-
-    init_get_bits(&gb, hdr, 16 * 8);
-
-    skip_bits_long(&gb, 39);
-    sample_blocks = get_bits(&gb, 7) + 1;
-    if (sample_blocks < 8)
-        return AVERROR_INVALIDDATA;
-    *duration = 256 * (sample_blocks / 8);
-
-    pc1->framesize = get_bits(&gb, 14) + 1;
-    if (pc1->framesize < 95)
-        return AVERROR_INVALIDDATA;
-    audio_mode   = get_bits(&gb, 6);
-    pc1->sr_code = get_bits(&gb, 4);
-    *sample_rate = avpriv_dca_sample_rates[pc1->sr_code];
-    if (*sample_rate == 0)
+    if (avpriv_dca_parse_core_frame_header(&h, hdr, ret) < 0)
         return AVERROR_INVALIDDATA;
 
+    *duration = h.npcmblocks * DCA_PCMBLOCK_SAMPLES;
+    *sample_rate = avpriv_dca_sample_rates[h.sr_code];
+#if 0 //PLEX
+    if (*profile != FF_PROFILE_UNKNOWN)
+        return 0;
+#endif //PLEX
+
+    *profile = FF_PROFILE_DTS;
+    if (h.ext_audio_present) {
+        switch (h.ext_audio_type) {
+        case DCA_EXT_AUDIO_XCH:
+        case DCA_EXT_AUDIO_XXCH:
+            *profile = FF_PROFILE_DTS_ES;
+            break;
+        case DCA_EXT_AUDIO_X96:
+            *profile = FF_PROFILE_DTS_96_24;
+            break;
+        }
+    }
+
+    //PLEX
     // Transmission bit rate
-    avctx->bit_rate = ff_dca_bit_rates[get_bits(&gb, 5)];
+    avctx->bit_rate = ff_dca_bit_rates[h.br_code];
 
-    // Additional flags
-    skip_bits(&gb, 5);
+    avctx->bits_per_raw_sample = ff_dca_bits_per_sample[h.pcmr_code];
 
-    // Extension audio
-    ext_audio_type = get_bits(&gb, 3);
-    ext_audio_present = get_bits1(&gb);
-
-    // Audio sync word insertion flag
-    skip_bits(&gb, 1);
-
-    ch_mask = ff_dca_audio_mode_ch_mask[audio_mode];
+    ch_mask = ff_dca_audio_mode_ch_mask[h.audio_mode];
     // Low frequency effects flag
-    if (get_bits(&gb, 2))
+    if (h.lfe_present)
         ch_mask |= DCA_SPEAKER_MASK_LFE1;
+    //PLEX
 
-    frame_size = FFALIGN(pc1->framesize, 4);
+    frame_size = FFALIGN(h.frame_size, 4);
+    if (buf_size - 4 < frame_size)
+        goto parse_full;
 
+    buf      += frame_size;
+    buf_size -= frame_size;
+    if (AV_RB32(buf) != DCA_SYNCWORD_SUBSTREAM)
+        goto parse_full;
+    if (ff_dca_exss_parse(&pc1->exss, buf, buf_size) < 0)
+        goto parse_full;
+
+    if (asset->extension_mask & DCA_EXSS_XLL)
+        *profile = FF_PROFILE_DTS_HD_MA;
+    else if (asset->extension_mask & (DCA_EXSS_XBR | DCA_EXSS_XXCH | DCA_EXSS_X96))
+        *profile = FF_PROFILE_DTS_HD_HRA;
+
+    //PLEX
 parse_full:
     if ((!avctx->channel_layout || !avctx->channels || !avctx->sample_rate)) {
         const AVCRC *crctab = av_crc_get_table(AV_CRC_16_CCITT);
         int xch_pos = 0, x96_pos = 0, xxch_pos = 0, i;
-        uint32_t mrk = AV_RB32(buf);
+        uint32_t mrk = AV_RB32(input);
         uint8_t *bebuf = NULL;
-        const uint8_t *input = buf;
-        int input_size = buf_size;
         DCAExssAsset *asset = &pc1->exss.assets[0];
         if (mrk != DCA_SYNCWORD_CORE_BE && mrk != DCA_SYNCWORD_SUBSTREAM) {
-            if (!(bebuf = av_malloc(buf_size)))
+            if (!(bebuf = av_malloc(input_size)))
                 goto fail;
-            if ((ret = avpriv_dca_convert_bitstream(buf, buf_size, bebuf, buf_size)) < 0)
+            if ((ret = avpriv_dca_convert_bitstream(input, input_size, bebuf, input_size)) < 0)
                 goto fail;
             input = bebuf;
         }
 
-        if ((ret = init_get_bits8(&gb, input, buf_size)) < 0)
+        if ((ret = init_get_bits8(&gb, input, input_size)) < 0)
             goto fail;
 
         if (AV_RB32(input) == DCA_SYNCWORD_CORE_BE) {
-            if (ext_audio_present) {
+            if (h.ext_audio_present) {
                 int sync_pos = FFMIN(frame_size / 4, gb.size_in_bits / 32) - 1;
                 int last_pos = get_bits_count(&gb) / 32;
                 int size, dist;
-                switch (ext_audio_type) {
+                switch (h.ext_audio_type) {
                 case EXT_AUDIO_XCH:
                     if (avctx->request_channel_layout)
                         break;
@@ -470,8 +493,6 @@ parse_full:
                 goto fail;
         }
 
-        avctx->sample_fmt = AV_SAMPLE_FMT_S16P;
-
         if (asset && asset->extension_mask & DCA_EXSS_XLL) {
             DCAXllChSet *c;
             DCAXllDecoder xll = {0};
@@ -482,8 +503,6 @@ parse_full:
             *duration = xll.nframesamples << (xll.nfreqbands - 1);
             avctx->bits_per_raw_sample = xll.chset[0].storage_bit_res;
             avctx->bit_rate = 0;
-            if (avctx->bits_per_raw_sample == 24)
-                avctx->sample_fmt = AV_SAMPLE_FMT_S32P;
             ch_mask = 0;
             for (i = 0, c = xll.chset; i < xll.nactivechsets; i++, c++)
                 ch_mask |= c->ch_mask;
@@ -539,6 +558,10 @@ fail:
         avctx->channels = av_get_channel_layout_nb_channels(avctx->channel_layout);
     }
 
+    if (avctx->sample_fmt == AV_SAMPLE_FMT_NONE)
+        avctx->sample_fmt = (avctx->bits_per_raw_sample > 16) ?  AV_SAMPLE_FMT_S32P : AV_SAMPLE_FMT_S16P;
+    //PLEX
+
     return 0;
 }
 
@@ -570,7 +593,7 @@ static int dca_parse(AVCodecParserContext *s, AVCodecContext *avctx,
     }
 
     /* read the duration and sample rate from the frame header */
-    if (!dca_parse_params(pc1, avctx, buf, buf_size, &duration, &sample_rate)) {
+    if (!dca_parse_params(pc1, avctx, buf, buf_size, &duration, &sample_rate, &avctx->profile)) {
         if (!avctx->sample_rate)
             avctx->sample_rate = sample_rate;
         s->duration = av_rescale(duration, avctx->sample_rate, sample_rate);

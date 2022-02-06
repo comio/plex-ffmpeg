@@ -66,11 +66,12 @@ static int check(AVIOContext *pb, int64_t pos, uint32_t *header);
 
 /* mp3 read */
 
-static int mp3_read_probe(AVProbeData *p)
+static int mpa_read_probe(const AVProbeData *p, int layer)
 {
     int max_frames, first_frames = 0;
     int whole_used = 0;
     int frames, ret;
+    int framesizes, max_framesizes;
     uint32_t header;
     const uint8_t *buf, *buf0, *buf2, *end;
 
@@ -80,20 +81,23 @@ static int mp3_read_probe(AVProbeData *p)
         buf0++;
 
     max_frames = 0;
+    max_framesizes = 0;
     buf = buf0;
 
     for(; buf < end; buf= buf2+1) {
         buf2 = buf;
-        for(frames = 0; buf2 < end; frames++) {
+        for(framesizes = frames = 0; buf2 < end; frames++) {
             MPADecodeHeader h;
 
             header = AV_RB32(buf2);
             ret = avpriv_mpegaudio_decode_header(&h, header);
-            if (ret != 0)
+            if (ret != 0 || h.layer != layer)
                 break;
             buf2 += h.frame_size;
+            framesizes += h.frame_size;
         }
         max_frames = FFMAX(max_frames, frames);
+        max_framesizes = FFMAX(max_framesizes, framesizes);
         if(buf == buf0) {
             first_frames= frames;
             if (buf2 == end + sizeof(uint32_t))
@@ -103,14 +107,21 @@ static int mp3_read_probe(AVProbeData *p)
     // keep this in sync with ac3 probe, both need to avoid
     // issues with MPEG-files!
     if   (first_frames>=7) return AVPROBE_SCORE_EXTENSION + 1;
-    else if(max_frames>200)return AVPROBE_SCORE_EXTENSION;
-    else if(max_frames>=4 && max_frames >= p->buf_size/10000) return AVPROBE_SCORE_EXTENSION / 2;
-    else if(ff_id3v2_match(buf0, ID3v2_DEFAULT_MAGIC) && 2*ff_id3v2_tag_len(buf0) >= p->buf_size)
+    else if(max_frames>200 && p->buf_size < 2*max_framesizes)return AVPROBE_SCORE_EXTENSION;
+    else if(max_frames>=4 && p->buf_size < 2*max_framesizes) return AVPROBE_SCORE_EXTENSION / 2;
+    else if(ff_id3v2_match(buf0, ID3v2_DEFAULT_MAGIC) && 2*ff_id3v2_tag_len(buf0) >= p->buf_size &&
+            (p->buf_size < PROBE_BUF_MAX || layer == 3))
                            return p->buf_size < PROBE_BUF_MAX ? AVPROBE_SCORE_EXTENSION / 4 : AVPROBE_SCORE_EXTENSION - 2;
     else if(first_frames > 1 && whole_used) return 5;
-    else if(max_frames>=1 && max_frames >= p->buf_size/10000) return 1;
+    else if(max_frames>=1 && p->buf_size < 10*max_framesizes) return 1;
     else                   return 0;
 //mpegps_mp3_unrecognized_format.mpg has max_frames=3
+}
+
+#define READ_PROBE(l) \
+static int mp##l##_read_probe(const AVProbeData *p) \
+{ \
+    return mpa_read_probe(p, l); \
 }
 
 static void read_xing_toc(AVFormatContext *s, int64_t filesize, int64_t duration)
@@ -142,7 +153,7 @@ static void mp3_parse_info_tag(AVFormatContext *s, AVStream *st,
                                MPADecodeHeader *c, uint32_t spf)
 {
 #define LAST_BITS(k, n) ((k) & ((1 << (n)) - 1))
-#define MIDDLE_BITS(k, m, n) LAST_BITS((k) >> (m), ((n) - (m)))
+#define MIDDLE_BITS(k, m, n) LAST_BITS((k) >> (m), ((n) - (m) + 1))
 
     uint16_t crc;
     uint32_t v;
@@ -341,7 +352,7 @@ static int mp3_parse_vbr_tags(AVFormatContext *s, AVStream *st, int64_t base)
     return 0;
 }
 
-static int mp3_read_header(AVFormatContext *s)
+static int mpa_read_header(AVFormatContext *s, enum AVCodecID id)
 {
     MP3DecContext *mp3 = s->priv_data;
     AVStream *st;
@@ -349,12 +360,15 @@ static int mp3_read_header(AVFormatContext *s)
     int ret;
     int i;
 
+    s->metadata = s->internal->id3v2_meta;
+    s->internal->id3v2_meta = NULL;
+
     st = avformat_new_stream(s, NULL);
     if (!st)
         return AVERROR(ENOMEM);
 
     st->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
-    st->codecpar->codec_id = AV_CODEC_ID_MP3;
+    st->codecpar->codec_id = id;
     st->need_parsing = AVSTREAM_PARSE_FULL_RAW;
     st->start_time = 0;
 
@@ -367,7 +381,7 @@ static int mp3_read_header(AVFormatContext *s)
     if (!av_dict_get(s->metadata, "", NULL, AV_DICT_IGNORE_SUFFIX))
         ff_id3v1_read(s);
 
-    if(s->pb->seekable)
+    if(s->pb->seekable & AVIO_SEEKABLE_NORMAL)
         mp3->filesize = avio_size(s->pb);
 
     if (mp3_parse_vbr_tags(s, st, off) < 0)
@@ -419,6 +433,12 @@ static int mp3_read_header(AVFormatContext *s)
     return 0;
 }
 
+#define READ_HEADER(l) \
+static int mp##l##_read_header(AVFormatContext *s) \
+{ \
+    return mpa_read_header(s, AV_CODEC_ID_MP##l); \
+}
+
 #define MP3_PACKET_SIZE 1024
 
 static int mp3_read_packet(AVFormatContext *s, AVPacket *pkt)
@@ -457,7 +477,8 @@ static int check(AVIOContext *pb, int64_t pos, uint32_t *ret_header)
         return CHECK_SEEK_FAILED;
 
     ret = avio_read(pb, &header_buf[0], 4);
-    if (ret < 0)
+    /* We should always find four bytes for a valid mpa header. */
+    if (ret < 4)
         return CHECK_SEEK_FAILED;
 
     header = AV_RB32(&header_buf[0]);
@@ -504,9 +525,9 @@ static int64_t mp3_sync(AVFormatContext *s, int64_t target_pos, int flags)
                     return AVERROR(EINVAL);
                 }
             }
-            if ((target_pos - pos)*dir <= 0 && abs(MIN_VALID/2-j) < score) {
+            if ((target_pos - pos)*dir <= 0 && FFABS(MIN_VALID/2-j) < score) {
                 candidate = pos;
-                score = abs(MIN_VALID/2-j);
+                score = FFABS(MIN_VALID/2-j);
             }
             pos += ret;
         }
@@ -578,23 +599,30 @@ static const AVOption options[] = {
     { NULL },
 };
 
-static const AVClass demuxer_class = {
-    .class_name = "mp3",
-    .item_name  = av_default_item_name,
-    .option     = options,
-    .version    = LIBAVUTIL_VERSION_INT,
-    .category   = AV_CLASS_CATEGORY_DEMUXER,
+#define DECLARE_LAYER(l, ext) \
+READ_PROBE(l) \
+READ_HEADER(l) \
+static const AVClass demuxer_class_##l = { \
+    .class_name = "mp" #l, \
+    .item_name  = av_default_item_name, \
+    .option     = options, \
+    .version    = LIBAVUTIL_VERSION_INT, \
+    .category   = AV_CLASS_CATEGORY_DEMUXER, \
+}; \
+\
+AVInputFormat ff_mp##l##_demuxer = { \
+    .name           = "mp" #l, \
+    .long_name      = NULL_IF_CONFIG_SMALL("MP" #l " (MPEG audio layer " #l ")"), \
+    .read_probe     = mp##l##_read_probe, \
+    .read_header    = mp##l##_read_header, \
+    .read_packet    = mp3_read_packet, \
+    .read_seek      = mp3_seek, \
+    .priv_data_size = sizeof(MP3DecContext), \
+    .flags          = AVFMT_GENERIC_INDEX, \
+    .extensions     = ext, /* XXX: use probe */ \
+    .priv_class     = &demuxer_class_##l, \
 };
 
-AVInputFormat ff_mp3_demuxer = {
-    .name           = "mp3",
-    .long_name      = NULL_IF_CONFIG_SMALL("MP2/3 (MPEG audio layer 2/3)"),
-    .read_probe     = mp3_read_probe,
-    .read_header    = mp3_read_header,
-    .read_packet    = mp3_read_packet,
-    .read_seek      = mp3_seek,
-    .priv_data_size = sizeof(MP3DecContext),
-    .flags          = AVFMT_GENERIC_INDEX,
-    .extensions     = "mp2,mp3,m2a,mpa", /* XXX: use probe */
-    .priv_class     = &demuxer_class,
-};
+DECLARE_LAYER(1, "mp1,mpa")
+DECLARE_LAYER(2, "mp2,m2a,mpa")
+DECLARE_LAYER(3, "mp3,mpa")

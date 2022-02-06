@@ -80,16 +80,27 @@ static void qpeg_decode_intra(QpegContext *qctx, uint8_t *dst,
 
             p = bytestream2_get_byte(&qctx->buffer);
             for(i = 0; i < run; i++) {
-                dst[filled++] = p;
+                int step = FFMIN(run - i, width - filled);
+                memset(dst+filled, p, step);
+                filled += step;
+                i      += step - 1;
                 if (filled >= width) {
                     filled = 0;
                     dst -= stride;
                     rows_to_go--;
+                    while (run - i > width && rows_to_go > 0) {
+                        memset(dst, p, width);
+                        dst -= stride;
+                        rows_to_go--;
+                        i += width;
+                    }
                     if(rows_to_go <= 0)
                         break;
                 }
             }
         } else {
+            if (bytestream2_get_bytes_left(&qctx->buffer) < copy)
+                copy = bytestream2_get_bytes_left(&qctx->buffer);
             for(i = 0; i < copy; i++) {
                 dst[filled++] = bytestream2_get_byte(&qctx->buffer);
                 if (filled >= width) {
@@ -166,7 +177,7 @@ static void av_noinline qpeg_decode_inter(QpegContext *qctx, uint8_t *dst,
                     if ((me_x + filled < 0) || (me_x + me_w + filled > width) ||
                        (height - me_y - me_h < 0) || (height - me_y >= orig_height) ||
                        (filled + me_w > width) || (height - me_h < 0))
-                        av_log(NULL, AV_LOG_ERROR, "Bogus motion vector (%i,%i), block size %ix%i at %i,%i\n",
+                        av_log(qctx->avctx, AV_LOG_ERROR, "Bogus motion vector (%i,%i), block size %ix%i at %i,%i\n",
                                me_x, me_y, me_w, me_h, filled, height);
                     else {
                         /* do motion compensation */

@@ -140,6 +140,16 @@ struct AVFormatInternal {
      * Whether or not avformat_init_output fully initialized streams
      */
     int streams_initialized;
+
+    /**
+     * ID3v2 tag useful for MP3 demuxing
+     */
+    AVDictionary *id3v2_meta;
+
+    /*
+     * Prefer the codec framerate for avg_frame_rate computation.
+     */
+    int prefer_codec_framerate;
 };
 
 struct AVStreamInternal {
@@ -173,10 +183,30 @@ struct AVStreamInternal {
 
     enum AVCodecID orig_codec_id;
 
+    /* the context for extracting extradata in find_stream_info()
+     * inited=1/bsf=NULL signals that extracting is not possible (codec not
+     * supported) */
+    struct {
+        AVBSFContext *bsf;
+        AVPacket     *pkt;
+        int inited;
+    } extract_extradata;
+
     /**
      * Whether the internal avctx needs to be updated from codecpar (after a late change to codecpar)
      */
     int need_context_update;
+
+//PLEX
+    int decrypt_inited;
+//PLEX
+
+    /**
+     * The wallclock timestamp of the most recent read packet (if AVFMT_FLAG_FILL_WALLCLOCK_DTS is set)
+     */
+    int64_t cur_wallclock_time;
+
+    FFFrac *priv_pts;
 };
 
 #ifdef __GNUC__
@@ -195,6 +225,14 @@ do {\
 #endif
 
 struct tm *ff_brktimegm(time_t secs, struct tm *tm);
+
+/**
+ * Automatically create sub-directories
+ *
+ * @param path will create sub-directories by path
+ * @return 0, or < 0 on error
+ */
+int ff_mkdir_p(const char *path);
 
 char *ff_data_to_hex(char *buf, const uint8_t *src, int size, int lowercase);
 
@@ -223,6 +261,14 @@ void ff_read_frame_flush(AVFormatContext *s);
 
 /** Get the current time since NTP epoch in microseconds. */
 uint64_t ff_ntp_time(void);
+
+/**
+ * Get the NTP time stamp formatted as per the RFC-5905.
+ *
+ * @param ntp_time NTP time in micro seconds (since NTP epoch)
+ * @return the formatted NTP time stamp
+ */
+uint64_t ff_get_formatted_ntp_time(uint64_t ntp_time_us);
 
 /**
  * Append the media-specific SDP fragment for the media stream c
@@ -283,6 +329,42 @@ void ff_put_v(AVIOContext *bc, uint64_t val);
  *         final \\0
  */
 int ff_get_line(AVIOContext *s, char *buf, int maxlen);
+
+/**
+ * Same as ff_get_line but strip the white-space characters in the text tail
+ *
+ * @param s the read-only AVIOContext
+ * @param buf buffer to store the read line
+ * @param maxlen size of the buffer
+ * @return the length of the string written in the buffer
+ */
+int ff_get_chomp_line(AVIOContext *s, char *buf, int maxlen);
+
+/**
+ * Read a whole line of text from AVIOContext to an AVBPrint buffer. Stop
+ * reading after reaching a \\r, a \\n, a \\r\\n, a \\0 or EOF.  The line
+ * ending characters are NOT included in the buffer, but they are skipped on
+ * the input.
+ *
+ * @param s the read-only AVIOContext
+ * @param bp the AVBPrint buffer
+ * @return the length of the read line, not including the line endings,
+ *         negative on error.
+ */
+int64_t ff_read_line_to_bprint(AVIOContext *s, AVBPrint *bp);
+
+/**
+ * Read a whole line of text from AVIOContext to an AVBPrint buffer overwriting
+ * its contents. Stop reading after reaching a \\r, a \\n, a \\r\\n, a \\0 or
+ * EOF. The line ending characters are NOT included in the buffer, but they
+ * are skipped on the input.
+ *
+ * @param s the read-only AVIOContext
+ * @param bp the AVBPrint buffer
+ * @return the length of the read line not including the line endings,
+ *         negative on error, or if the buffer becomes truncated.
+ */
+int64_t ff_read_line_to_bprint_overwrite(AVIOContext *s, AVBPrint *bp);
 
 #define SPACE_CHARS " \t\r\n"
 
@@ -526,8 +608,11 @@ static inline int ff_rename(const char *oldpath, const char *newpath, void *logc
     int ret = 0;
     if (rename(oldpath, newpath) == -1) {
         ret = AVERROR(errno);
-        if (logctx)
-            av_log(logctx, AV_LOG_ERROR, "failed to rename file %s to %s\n", oldpath, newpath);
+        if (logctx) {
+            char err[AV_ERROR_MAX_STRING_SIZE] = {0};
+            av_make_error_string(err, AV_ERROR_MAX_STRING_SIZE, ret);
+            av_log(logctx, AV_LOG_ERROR, "failed to rename file %s to %s: %s\n", oldpath, newpath, err);
+        }
     }
     return ret;
 }
@@ -535,6 +620,8 @@ static inline int ff_rename(const char *oldpath, const char *newpath, void *logc
 /**
  * Allocate extradata with additional AV_INPUT_BUFFER_PADDING_SIZE at end
  * which is always set to 0.
+ *
+ * Previously allocated extradata in par will be freed.
  *
  * @param size size of extradata
  * @return 0 if OK, AVERROR_xxx on error
@@ -604,6 +691,14 @@ int ff_format_output_open(AVFormatContext *s, const char *url, AVDictionary **op
 void ff_format_io_close(AVFormatContext *s, AVIOContext **pb);
 
 /**
+ * Utility function to check if the file uses http or https protocol
+ *
+ * @param s AVFormatContext
+ * @param filename URL or file name to open for writing
+ */
+int ff_is_http_proto(char *filename);
+
+/**
  * Parse creation_time in AVFormatContext metadata if exists and warn if the
  * parsing fails.
  *
@@ -657,14 +752,73 @@ int ff_bprint_to_codecpar_extradata(AVCodecParameters *par, struct AVBPrint *buf
 
 /**
  * Find the next packet in the interleaving queue for the given stream.
- * The packet is not removed from the interleaving queue, but only
- * a pointer to it is returned.
+ * The pkt parameter is filled in with the queued packet, including
+ * references to the data (which the caller is not allowed to keep or
+ * modify).
  *
- * @param ts_offset the ts difference between packet in the queue and the muxer.
- *
- * @return a pointer to the next packet, or NULL if no packet is queued
- *         for this stream.
+ * @return 0 if a packet was found, a negative value if no packet was found
  */
-const AVPacket *ff_interleaved_peek(AVFormatContext *s, int stream, int64_t *ts_offset);
+int ff_interleaved_peek(AVFormatContext *s, int stream,
+                        AVPacket *pkt, int add_offset);
+
+
+int ff_lock_avformat(void);
+int ff_unlock_avformat(void);
+
+/**
+ * Set AVFormatContext url field to the provided pointer. The pointer must
+ * point to a valid string. The existing url field is freed if necessary. Also
+ * set the legacy filename field to the same string which was provided in url.
+ */
+void ff_format_set_url(AVFormatContext *s, char *url);
+
+#define FF_PACKETLIST_FLAG_REF_PACKET (1 << 0) /**< Create a new reference for the packet instead of
+                                                    transferring the ownership of the existing one to the
+                                                    list. */
+
+/**
+ * Append an AVPacket to the list.
+ *
+ * @param head  List head element
+ * @param tail  List tail element
+ * @param pkt   The packet being appended
+ * @param flags Any combination of FF_PACKETLIST_FLAG_* flags
+ * @return 0 on success, negative AVERROR value on failure. On failure,
+           the list is unchanged
+ */
+int ff_packet_list_put(AVPacketList **head, AVPacketList **tail,
+                       AVPacket *pkt, int flags);
+
+/**
+ * Remove the oldest AVPacket in the list and return it.
+ *
+ * @note The pkt will be overwritten completely. The caller owns the
+ *       packet and must unref it by itself.
+ *
+ * @param head List head element
+ * @param tail List tail element
+ * @param pkt  Pointer to an initialized AVPacket struct
+ */
+int ff_packet_list_get(AVPacketList **head, AVPacketList **tail,
+                       AVPacket *pkt);
+
+/**
+ * Wipe the list and unref all the packets in it.
+ *
+ * @param head List head element
+ * @param tail List tail element
+ */
+void ff_packet_list_free(AVPacketList **head, AVPacketList **tail);
+
+void avpriv_register_devices(const AVOutputFormat * const o[], const AVInputFormat * const i[]);
+
+/**
+ * Copy the side data from one stream to another; useful in chained (de)muxers
+ *
+ * @param dst Stream to copy to
+ * @param src Stream to copy from
+ * @return 0 on success, negative AVERROR value on failure
+ */
+int ff_stream_copy_side_data(AVStream *dst, const AVStream *src);
 
 #endif /* AVFORMAT_INTERNAL_H */

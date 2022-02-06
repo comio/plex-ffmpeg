@@ -21,7 +21,6 @@
 #include "libavutil/log.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
-#include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
 #include "libavutil/bprint.h"
 
@@ -173,14 +172,24 @@ int av_bsf_init(AVBSFContext *ctx)
     return 0;
 }
 
+void av_bsf_flush(AVBSFContext *ctx)
+{
+    ctx->internal->eof = 0;
+
+    av_packet_unref(ctx->internal->buffer_pkt);
+
+    if (ctx->filter->flush)
+        ctx->filter->flush(ctx);
+}
+
 int av_bsf_send_packet(AVBSFContext *ctx, AVPacket *pkt)
 {
-    if (!pkt) {
+    int ret;
+
+    if (!pkt || (!pkt->data && !pkt->side_data_elems)) {
         ctx->internal->eof = 1;
         return 0;
     }
-
-    av_assert0(pkt->data || pkt->side_data);
 
     if (ctx->internal->eof) {
         av_log(ctx, AV_LOG_ERROR, "A non-NULL packet sent after an EOF.\n");
@@ -191,6 +200,9 @@ int av_bsf_send_packet(AVBSFContext *ctx, AVPacket *pkt)
         ctx->internal->buffer_pkt->side_data_elems)
         return AVERROR(EAGAIN);
 
+    ret = av_packet_make_refcounted(pkt);
+    if (ret < 0)
+        return ret;
     av_packet_move_ref(ctx->internal->buffer_pkt, pkt);
 
     return 0;
@@ -338,6 +350,15 @@ static int bsf_list_filter(AVBSFContext *bsf, AVPacket *out)
     return ret;
 }
 
+static void bsf_list_flush(AVBSFContext *bsf)
+{
+    BSFListContext *lst = bsf->priv_data;
+
+    for (int i = 0; i < lst->nb_bsfs; i++)
+        av_bsf_flush(lst->bsfs[i]);
+    lst->idx = lst->flushed_idx = 0;
+}
+
 static void bsf_list_close(AVBSFContext *bsf)
 {
     BSFListContext *lst = bsf->priv_data;
@@ -386,6 +407,7 @@ const AVBitStreamFilter ff_list_bsf = {
         .priv_class     = &bsf_list_class,
         .init           = bsf_list_init,
         .filter         = bsf_list_filter,
+        .flush          = bsf_list_flush,
         .close          = bsf_list_close,
 };
 
@@ -403,7 +425,7 @@ void av_bsf_list_free(AVBSFList **lst)
 {
     int i;
 
-    if (*lst)
+    if (!*lst)
         return;
 
     for (i = 0; i < (*lst)->nb_bsfs; ++i)
@@ -514,8 +536,10 @@ int av_bsf_list_parse_str(const char *str, AVBSFContext **bsf_lst)
     if (!lst)
         return AVERROR(ENOMEM);
 
-    if (!(dup = buf = av_strdup(str)))
-        return AVERROR(ENOMEM);
+    if (!(dup = buf = av_strdup(str))) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
 
     while (1) {
         bsf_str = av_strtok(buf, ",", &saveptr);

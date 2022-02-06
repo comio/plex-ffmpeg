@@ -34,22 +34,10 @@
 #include "audiodsp.h"
 #include "internal.h"
 #include "ac3enc.h"
+#if CONFIG_EAC3_ENCODER
 #include "eac3enc.h"
+#endif
 
-/* prototypes for static functions in ac3enc_fixed.c and ac3enc_float.c */
-
-static void scale_coefficients(AC3EncodeContext *s);
-
-static int normalize_samples(AC3EncodeContext *s);
-
-static void clip_coefficients(AudioDSPContext *adsp, CoefType *coef,
-                              unsigned int len);
-
-static CoefType calc_cpl_coord(CoefSumType energy_ch, CoefSumType energy_cpl);
-
-static void sum_square_butterfly(AC3EncodeContext *s, CoefSumType sum[4],
-                                 const CoefType *coef0, const CoefType *coef1,
-                                 int len);
 
 int AC3_NAME(allocate_sample_buffers)(AC3EncodeContext *s)
 {
@@ -113,10 +101,10 @@ static void apply_mdct(AC3EncodeContext *s)
 #else
             s->ac3dsp.apply_window_int16(s->windowed_samples, input_samples,
                                          s->mdct_window, AC3_WINDOW_SIZE);
-#endif
 
             if (s->fixed_point)
                 block->coeff_shift[ch+1] = normalize_samples(s);
+#endif
 
             s->mdct.mdct_calcw(&s->mdct, block->mdct_coef[ch+1],
                                s->windowed_samples);
@@ -328,8 +316,10 @@ static void apply_channel_coupling(AC3EncodeContext *s)
         }
     }
 
+#if CONFIG_EAC3_ENCODER
     if (CONFIG_EAC3_ENCODER && s->eac3)
         ff_eac3_set_cpl_states(s);
+#endif
 }
 
 
