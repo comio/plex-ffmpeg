@@ -24,8 +24,11 @@
 #include "libavutil/buffer_internal.h"
 #include "libavutil/avassert.h"
 
+#include <assert.h>
+#include <android/native_window.h>
 #include <media/NdkMediaCodec.h>
 #include "avcodec.h"
+#include "decode.h"
 #include "internal.h"
 #include "h264.h"
 #include "mediacodecndk.h"
@@ -37,9 +40,12 @@ typedef struct
     AVBufferRef *decoder_ref;
     AVBSFContext *bsfc;
 
-    uint32_t stride, plane_height;
+    uint32_t stride, slice_height;
     int deint_mode;
-    int eos_reached;
+
+    ssize_t waiting_buffer;
+
+    int out_width, out_height;
 } MediaCodecNDKDecoderContext;
 
 #define TIMEOUT 10000
@@ -47,12 +53,14 @@ typedef struct
 #define OFFSET(x) offsetof(MediaCodecNDKDecoderContext, x)
 static const AVOption options[] = {
     { "hwdeint_mode", "Used for setting deinterlace mode in MediaCodecNDKDecoder", OFFSET(deint_mode), AV_OPT_TYPE_INT,{ .i64 = 1 } , 0, 2, AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_DECODING_PARAM },
+    { "output_size", "Output width/height", OFFSET(out_width), AV_OPT_TYPE_IMAGE_SIZE, {.i64 = 0} , 0, 3840, AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_DECODING_PARAM },
     { NULL },
 };
 
 static void mediacodecndk_delete_decoder(void *opaque, uint8_t *data)
 {
     AMediaCodec *decoder = opaque;
+    av_log(NULL, AV_LOG_DEBUG, "Deleting decoder\n");
     AMediaCodec_delete(decoder);
 }
 
@@ -60,51 +68,23 @@ static av_cold int mediacodecndk_decode_init(AVCodecContext *avctx)
 {
     MediaCodecNDKDecoderContext *ctx = avctx->priv_data;
     AMediaFormat* format;
-    const char* mime;
-    const char *bsf_name = NULL;
+    const char *mime = ff_mediacodecndk_get_mime(avctx->codec_id);
     int ret = ff_mediacodecndk_init_binder();
 
     if (ret < 0)
         return ret;
 
-    switch (avctx->codec_id) {
-    case AV_CODEC_ID_H264:
-        mime = "video/avc";
-        break;
-    case AV_CODEC_ID_HEVC:
-        mime = "video/hevc";
-        break;
-    case AV_CODEC_ID_MPEG2VIDEO:
-        mime = "video/mpeg2";
-        break;
-    default:
-        av_assert0(!"Unsupported codec ID");
-    }
+    ctx->waiting_buffer = -1;
 
-    av_log(avctx, AV_LOG_DEBUG, "codec mime type %s\n", mime);
-
-    if(avctx->extradata && avctx->extradata[0] == 1) {
-        if (avctx->codec_id == AV_CODEC_ID_H264)
-            bsf_name = "h264_mp4toannexb";
-        else if (avctx->codec_id == AV_CODEC_ID_HEVC)
-            bsf_name = "hevc_mp4toannexb";
-    }
-    if (bsf_name) {
-        const AVBitStreamFilter *bsf = av_bsf_get_by_name(bsf_name);
-        if(!bsf)
-            return AVERROR_BSF_NOT_FOUND;
-        if ((ret = av_bsf_alloc(bsf, &ctx->bsfc)))
-            return ret;
-        if (((ret = avcodec_parameters_from_context(ctx->bsfc->par_in, avctx)) < 0) ||
-            ((ret = av_bsf_init(ctx->bsfc)) < 0)) {
-            av_bsf_free(&ctx->bsfc);
-            return ret;
-        }
-    }
+    if (avctx->codec->type == AVMEDIA_TYPE_AUDIO)
+        avctx->sample_fmt = AV_SAMPLE_FMT_S16;
 
     format = AMediaFormat_new();
     if (!format)
         return AVERROR(ENOMEM);
+
+    if (avctx->extradata)
+        AMediaFormat_setBuffer(format, "csd-0", (void*)avctx->extradata, avctx->extradata_size);
 
     AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, mime);
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_COLOR_FORMAT, COLOR_FormatYUV420SemiPlanar);
@@ -113,145 +93,155 @@ static av_cold int mediacodecndk_decode_init(AVCodecContext *avctx)
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_HEIGHT, avctx->height);
     AMediaFormat_setInt32(format, "deinterlace-method", ctx->deint_mode);
 
-    ctx->decoder = AMediaCodec_createDecoderByType(mime);
-    if (!ctx->decoder) {
+    if (ctx->out_width && ctx->out_height) {
+        AMediaFormat_setInt32(format, "eWid", ctx->out_width);
+        AMediaFormat_setInt32(format, "eHei", ctx->out_height);
+        ff_set_dimensions(avctx, ctx->out_width, ctx->out_height);
+    }
+
+    if (!(ctx->decoder = AMediaCodec_createDecoderByType(mime))) {
         av_log(avctx, AV_LOG_ERROR, "Decoder could not be created\n");
-        AMediaFormat_delete(format);
-        return AVERROR_EXTERNAL;
+        ret = AVERROR_EXTERNAL;
+        goto fail;
     }
 
-    ctx->decoder_ref = av_buffer_create(NULL, 0, mediacodecndk_delete_decoder,
-                                        ctx->decoder, 0);
-
-    if (!ctx->decoder_ref) {
-        AMediaFormat_delete(format);
-        AMediaCodec_delete(ctx->decoder);
-        return AVERROR(ENOMEM);
+    if (!(ctx->decoder_ref = av_buffer_create(NULL, 0, mediacodecndk_delete_decoder,
+                                              ctx->decoder, 0))) {
+        ret = AVERROR(ENOMEM);
+        goto fail;
     }
 
-    AMediaCodec_configure(ctx->decoder, format,
-                          0, /* surface */
-                          0 /* crypto */,
-                          0 /* flags */);
+    if (AMediaCodec_configure(ctx->decoder, format, NULL, 0, 0) != AMEDIA_OK) {
+        av_log(avctx, AV_LOG_ERROR, "Failed to configure decoder; check parameters\n");
+        ret = AVERROR_EXTERNAL;
+        goto fail;
+    }
 
     AMediaCodec_start(ctx->decoder);
     AMediaFormat_delete(format);
     return 0;
-}
-
-static int mediacodecndk_queue_input_buffer(AVCodecContext *avctx, AVPacket* avpkt)
-{
-    MediaCodecNDKDecoderContext *ctx = avctx->priv_data;
-    int in_index, ret = 0;
-    size_t in_size;
-    uint8_t* in_buffer = NULL;
-    AVPacket filtered_pkt = {0};
-
-    if (ctx->bsfc && avpkt->data) {
-        AVPacket filter_pkt = {0};
-        if ((ret = av_packet_ref(&filter_pkt, avpkt)) < 0)
-            return ret;
-
-        if ((ret = av_bsf_send_packet(ctx->bsfc, &filter_pkt)) < 0) {
-            av_packet_unref(&filter_pkt);
-            return ret;
-        }
-
-        if ((ret = av_bsf_receive_packet(ctx->bsfc, &filtered_pkt)) < 0)
-            return ret;
-
-        avpkt = &filtered_pkt;
-    }
-
-    in_index = AMediaCodec_dequeueInputBuffer(ctx->decoder, TIMEOUT * 100);
-    if (in_index < 0) {
-        av_log(avctx, AV_LOG_ERROR, "Failed to get input buffer! ret = %d\n", in_index);
-        ret = AVERROR_EXTERNAL;
-        goto fail;
-    }
-
-    in_buffer = AMediaCodec_getInputBuffer(ctx->decoder, in_index, &in_size);
-    if (!in_buffer) {
-        av_log(avctx, AV_LOG_ERROR, "Cannot get input buffer!\n");
-        ret = AVERROR_EXTERNAL;
-        goto fail;
-    }
-
-    if (!avpkt->data) {
-        AMediaCodec_queueInputBuffer(ctx->decoder, in_index, 0, 0, 0, BUFFER_FLAG_EOS);
-        ctx->eos_reached = 1;
-        return 0;
-    }
-
-    av_assert0(avpkt->size <= in_size);
-    memcpy(in_buffer, avpkt->data, avpkt->size);
-    AMediaCodec_queueInputBuffer(ctx->decoder, in_index, 0, avpkt->size, avpkt->pts, 0);
 
 fail:
-    av_packet_unref(&filtered_pkt);
+    if (format)
+        AMediaFormat_delete(format);
+    if (ctx->decoder_ref)
+        av_buffer_unref(&ctx->decoder_ref);
+    else if (ctx->decoder)
+        AMediaCodec_delete(ctx->decoder);
     return ret;
 }
 
 static void mediacodecndk_free_buffer(void *opaque, uint8_t *data)
 {
     AVBufferRef *decoder_ref = opaque;
+    av_log(NULL, AV_LOG_DEBUG, "Releasing buffer: %" PRId32 "\n", (int32_t)data);
     AMediaCodec_releaseOutputBuffer(av_buffer_get_opaque(decoder_ref), (int32_t)data, false);
+    av_buffer_unref(&decoder_ref);
 }
 
-static int mediacodecndk_dequeue_output_buffer(AVCodecContext *avctx, AVFrame* frame)
+static int mediacodecndk_receive(AVCodecContext *avctx, AVFrame* frame)
 {
     MediaCodecNDKDecoderContext *ctx = avctx->priv_data;
     AMediaCodecBufferInfo bufferInfo;
     size_t out_size;
-    uint8_t* out_buffer = NULL;
-    int32_t out_index = -2;
+    uint8_t* out_buffer;
+    int32_t out_index;
     int ret;
     AVBufferRef *ref;
 
+    int64_t timeout = avctx->internal->draining ? 1000000 : 0;
+
+    if (avctx->internal->draining_done)
+        return AVERROR_EOF;
+
     while (1) {
-        out_index = AMediaCodec_dequeueOutputBuffer(ctx->decoder, &bufferInfo, TIMEOUT);
+        out_index = AMediaCodec_dequeueOutputBuffer(ctx->decoder, &bufferInfo, timeout);
         if (out_index >= 0) {
-            if (bufferInfo.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM)
-                return 0;
+            if (bufferInfo.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) {
+                ret = AVERROR_EOF;
+                goto fail;
+            }
             break;
         } else if (out_index == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) {
             av_log(avctx, AV_LOG_DEBUG, "Mediacodec info output buffers changed\n");
         } else if (out_index == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
-            int32_t width, height, plane_height, stride;
-            AMediaFormat *format = NULL;
-            int color_format = 0;
-            enum AVPixelFormat pix_fmt;
-            format = AMediaCodec_getOutputFormat(ctx->decoder);
+            AMediaFormat *format = AMediaCodec_getOutputFormat(ctx->decoder);
 
-            AMediaFormat_getInt32(format, "crop-width", &width);
-            AMediaFormat_getInt32(format, "crop-height", &height);
-            AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_HEIGHT, &plane_height);
-            AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_STRIDE, &stride);
-            AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_COLOR_FORMAT, &color_format);
-            AMediaFormat_delete(format);
-            pix_fmt = ff_mediacodecndk_get_pix_fmt(color_format);
-            if (pix_fmt == AV_PIX_FMT_NONE) {
-                av_log(avctx, AV_LOG_ERROR, "Unsupported color format: %i\n", color_format);
-                return AVERROR_EXTERNAL;
+            av_assert0(format);
+
+            av_log(avctx, AV_LOG_DEBUG, "MediaCodec output format changed: %s\n",
+                   AMediaFormat_toString(format));
+
+            if (avctx->codec->type == AVMEDIA_TYPE_AUDIO) {
+                int32_t channels, sample_rate;
+                AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &channels);
+                AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_SAMPLE_RATE, &sample_rate);
+                AMediaFormat_delete(format);
+
+                avctx->sample_rate = sample_rate;
+                avctx->channels = channels;
+            } else {
+                enum AVPixelFormat pix_fmt;
+                int32_t width = 0, height = 0, crop_width = 0, crop_height = 0, stride = 0, slice_height = 0, color_format = 0;
+                AMediaFormat_getInt32(format, "crop-width", &crop_width);
+                AMediaFormat_getInt32(format, "crop-height", &crop_height);
+                AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_WIDTH, &width);
+                AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_HEIGHT, &height);
+                AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_STRIDE, &stride);
+                AMediaFormat_getInt32(format, "slice-height", &slice_height);
+                AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_COLOR_FORMAT, &color_format);
+                AMediaFormat_delete(format);
+                pix_fmt = ff_mediacodecndk_get_pix_fmt(color_format);
+                if (pix_fmt == AV_PIX_FMT_NONE) {
+                    av_log(avctx, AV_LOG_ERROR, "Unsupported color format: %i\n", color_format);
+                    return AVERROR_EXTERNAL;
+                }
+                avctx->pix_fmt = pix_fmt;
+                if (stride)
+                    ctx->stride = stride;
+                else
+                    ctx->stride = width;
+                if (slice_height)
+                    ctx->slice_height = slice_height;
+                else
+                    ctx->slice_height = FFALIGN(height, 16);
+                if (crop_width && crop_height && (!ctx->out_width || !ctx->out_height))
+                    ff_set_dimensions(avctx, crop_width, crop_height);
+                else if (width && height && (!ctx->out_width || !ctx->out_height))
+                    ff_set_dimensions(avctx, width, height);
+
+                av_assert0(ctx->slice_height >= avctx->height &&
+                           ctx->stride >= avctx->width);
             }
-            avctx->pix_fmt = pix_fmt;
-            if (stride)
-                ctx->stride = stride;
-            if (plane_height)
-                ctx->plane_height = plane_height;
-            if (width && height)
-                ff_set_dimensions(avctx, width, height);
-            av_assert0(ctx->plane_height >= avctx->height &&
-                       ctx->stride >= avctx->width);
         } else if (out_index == AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
+            av_log(avctx, AV_LOG_DEBUG, "No frames available yet\n");
+            // This can mean either that the codec is starved and we need to send more
+            // frames (EAGAIN), or that it's still working and we need to wait on it.
+            // We can't tell which case it is, but if there are no input buffers
+            // available, we at least know it shouldn't be starved, so try again
+            // with a larger timeout in that case.
+            if (ctx->waiting_buffer < 0 && !timeout) {
+                ctx->waiting_buffer = AMediaCodec_dequeueInputBuffer(ctx->decoder, 0);
+                if (ctx->waiting_buffer < 0) {
+                    av_log(avctx, AV_LOG_VERBOSE, "Out of input buffers; waiting for output\n");
+                    timeout = 1000000;
+                    continue;
+                }
+            }
             return AVERROR(EAGAIN);
         } else {
-            av_log(avctx, AV_LOG_ERROR, "Unexpected info code: %d", out_index);
+            av_log(avctx, AV_LOG_ERROR, "Unexpected info code: %d\n", out_index);
             return AVERROR_EXTERNAL;
         }
     }
 
+    av_log(avctx, AV_LOG_DEBUG, "Returning buffer #%" PRId32 "\n", out_index);
+
     out_buffer = AMediaCodec_getOutputBuffer(ctx->decoder, out_index, &out_size);
+
+    if (avctx->codec->type == AVMEDIA_TYPE_AUDIO) {
+        frame->nb_samples = bufferInfo.size / avctx->channels / 2;
+    }
 
     if ((ret = ff_decode_frame_props(avctx, frame)) < 0)
         goto fail;
@@ -264,7 +254,7 @@ static int mediacodecndk_dequeue_output_buffer(AVCodecContext *avctx, AVFrame* f
         goto fail;
     }
 
-    frame->buf[0] = av_buffer_create((void*)(uint64_t)out_index, out_size, mediacodecndk_free_buffer,
+    frame->buf[0] = av_buffer_create((void*)(intptr_t)out_index, out_size, mediacodecndk_free_buffer,
                                      ref, BUFFER_FLAG_READONLY);
     if (!frame->buf[0]) {
         av_buffer_unref(&ref);
@@ -272,38 +262,82 @@ static int mediacodecndk_dequeue_output_buffer(AVCodecContext *avctx, AVFrame* f
         goto fail;
     }
     frame->data[0] = out_buffer;
-    frame->linesize[0] = ctx->stride;
-    frame->data[1] = out_buffer + ctx->stride * ctx->plane_height;
-    if (avctx->pix_fmt == AV_PIX_FMT_NV12) {
-        frame->linesize[1] = ctx->stride;
-    } else {
-        // FIXME: assuming chroma plane's stride is 1/2 of luma plane's for YV12
-        frame->linesize[1] = frame->linesize[2] = ctx->stride / 2;
-        frame->data[2] = frame->data[1] + ctx->stride * ctx->plane_height / 4;
+
+    if (avctx->codec->type == AVMEDIA_TYPE_VIDEO) {
+        frame->linesize[0] = ctx->stride;
+        frame->data[1] = out_buffer + ctx->stride * ctx->slice_height;
+        if (avctx->pix_fmt == AV_PIX_FMT_NV12) {
+            frame->linesize[1] = ctx->stride;
+        } else {
+            // FIXME: assuming chroma plane's stride is 1/2 of luma plane's for YV12
+            frame->linesize[1] = frame->linesize[2] = ctx->stride / 2;
+            frame->data[2] = frame->data[1] + ctx->stride * ctx->slice_height / 4;
+        }
     }
-    frame->pts = frame->pkt_pts = bufferInfo.presentationTimeUs;
+
+    frame->pts = bufferInfo.presentationTimeUs;
     frame->pkt_dts = AV_NOPTS_VALUE;
-    return 1;
+    return 0;
 fail:
     AMediaCodec_releaseOutputBuffer(ctx->decoder, out_index, false);
     return ret;
 }
 
-static int mediacodecndk_decode_frame(AVCodecContext *avctx, void *data,
-                                      int *got_frame, AVPacket *avpkt)
+static int mediacodecndk_send(AVCodecContext *avctx, const AVPacket* avpkt)
 {
     MediaCodecNDKDecoderContext *ctx = avctx->priv_data;
-    int ret;
+    int ret = 0;
+    size_t in_size;
+    uint8_t* in_buffer = NULL;
 
-    if (!ctx->eos_reached) {
-        if ((ret = mediacodecndk_queue_input_buffer(avctx, avpkt)) < 0)
-            return ret;
+    if (!avpkt->size) {
+        AMediaCodec_queueInputBuffer(ctx->decoder, ctx->waiting_buffer, 0, 0, 0, BUFFER_FLAG_EOS);
+        ret = AVERROR_EOF;
+        goto end;
     }
 
-    ret = mediacodecndk_dequeue_output_buffer(avctx, data);
-    *got_frame = ret <= 0 ? 0 : 1;
+    in_buffer = AMediaCodec_getInputBuffer(ctx->decoder, ctx->waiting_buffer, &in_size);
+    if (!in_buffer) {
+        av_log(avctx, AV_LOG_ERROR, "Cannot get input buffer (#%zd)!\n", ctx->waiting_buffer);
+        return AVERROR_EXTERNAL;
+    }
 
-    return ret < 0 ? ret : avpkt->size;
+    av_assert0(avpkt->size <= in_size);
+    memcpy(in_buffer, avpkt->data, avpkt->size);
+    AMediaCodec_queueInputBuffer(ctx->decoder, ctx->waiting_buffer, 0, avpkt->size, avpkt->pts, 0);
+
+end:
+    ctx->waiting_buffer = -1;
+    return ret;
+}
+
+static int mediacodecndk_receive_frame(AVCodecContext *avctx, AVFrame* frame)
+{
+    MediaCodecNDKDecoderContext *ctx = avctx->priv_data;
+    AVPacket pkt = {0};
+    int ret;
+
+    if ((ret = mediacodecndk_receive(avctx, frame)) != AVERROR(EAGAIN))
+        return ret;
+
+    if (ctx->waiting_buffer < 0)
+        ctx->waiting_buffer = AMediaCodec_dequeueInputBuffer(ctx->decoder, 1000000);
+    if (ctx->waiting_buffer < 0) {
+        av_log(avctx, AV_LOG_WARNING, "Failed to get input buffer! ret = %zd\n", ctx->waiting_buffer);
+        return AVERROR(EAGAIN);
+    }
+
+    if ((ret = ff_decode_get_packet(avctx, &pkt)) < 0 && ret != AVERROR_EOF)
+        return ret;
+
+    if ((ret = mediacodecndk_send(avctx, &pkt)) < 0 && ret != AVERROR_EOF)
+        goto end;
+
+    ret = mediacodecndk_receive(avctx, frame);
+
+end:
+    av_packet_unref(&pkt);
+    return ret;
 }
 
 static av_cold int mediacodecndk_decode_close(AVCodecContext *avctx)
@@ -325,28 +359,47 @@ static av_cold void mediacodecndk_decode_flush(AVCodecContext *avctx)
     AMediaCodec_flush(ctx->decoder);
 }
 
-#define FFMC_DEC_CLASS(NAME) \
+#define FFMC_DEC_CLASS(NAME, OPTIONS) \
     static const AVClass ffmediacodecndk_##NAME##_dec_class = { \
         .class_name = "mediacodecndk_" #NAME "_dec", \
+        .item_name  = av_default_item_name, \
+        .option     = OPTIONS, \
         .version    = LIBAVUTIL_VERSION_INT, \
     };
 
-#define FFMC_DEC(NAME, ID) \
-    FFMC_DEC_CLASS(NAME) \
+#define FFMC_DEC(TYPE, NAME, ID, BSFS) \
     AVCodec ff_##NAME##_mediacodecndk_decoder = { \
         .name           = #NAME "_mediacodecndk", \
         .long_name      = NULL_IF_CONFIG_SMALL(#NAME " (MediaCodec NDK)"), \
-        .type           = AVMEDIA_TYPE_VIDEO, \
+        .type           = AVMEDIA_TYPE_##TYPE, \
         .id             = ID, \
         .priv_data_size = sizeof(MediaCodecNDKDecoderContext), \
         .init           = mediacodecndk_decode_init, \
         .close          = mediacodecndk_decode_close, \
-        .decode         = mediacodecndk_decode_frame, \
+        .receive_frame  = mediacodecndk_receive_frame, \
         .flush          = mediacodecndk_decode_flush, \
         .priv_class     = &ffmediacodecndk_##NAME##_dec_class, \
-        .capabilities   = AV_CODEC_CAP_DELAY | FF_CODEC_CAP_INIT_CLEANUP, \
+        .capabilities   = AV_CODEC_CAP_DELAY, \
+        .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP, \
+        .bsfs           = BSFS, \
     };
 
-FFMC_DEC(h264, AV_CODEC_ID_H264)
-FFMC_DEC(hevc, AV_CODEC_ID_HEVC)
-FFMC_DEC(mpeg2, AV_CODEC_ID_MPEG2VIDEO)
+#define FFMC_VDEC(NAME, ID, BSFS) \
+    FFMC_DEC_CLASS(NAME, options) \
+    FFMC_DEC(VIDEO, NAME, ID, BSFS)
+
+#define FFMC_ADEC(NAME, ID, BSFS) \
+    FFMC_DEC_CLASS(NAME, NULL) \
+    FFMC_DEC(AUDIO, NAME, ID, BSFS)
+
+FFMC_VDEC(h264, AV_CODEC_ID_H264, "h264_mp4toannexb")
+FFMC_VDEC(hevc, AV_CODEC_ID_HEVC, "hevc_mp4toannexb")
+FFMC_VDEC(mpeg2, AV_CODEC_ID_MPEG2VIDEO, NULL)
+FFMC_VDEC(mpeg4, AV_CODEC_ID_MPEG4, NULL)
+FFMC_VDEC(vc1, AV_CODEC_ID_VC1, NULL)
+FFMC_VDEC(vp8, AV_CODEC_ID_VP8, NULL)
+FFMC_VDEC(vp9, AV_CODEC_ID_VP9, NULL)
+
+FFMC_ADEC(mp1, AV_CODEC_ID_MP1, NULL)
+FFMC_ADEC(mp2, AV_CODEC_ID_MP2, NULL)
+FFMC_ADEC(mp3, AV_CODEC_ID_MP3, NULL)

@@ -59,8 +59,11 @@ const AVCodecTag ff_mp4_obj_type[] = {
     { AV_CODEC_ID_AC3         , 0xA5 },
     { AV_CODEC_ID_EAC3        , 0xA6 },
     { AV_CODEC_ID_DTS         , 0xA9 }, /* mp4ra.org */
-    { AV_CODEC_ID_VP9         , 0xC0 }, /* nonstandard, update when there is a standard value */
+    { AV_CODEC_ID_OPUS        , 0xAD }, /* mp4ra.org */
+    { AV_CODEC_ID_VP9         , 0xB1 }, /* mp4ra.org */
+    { AV_CODEC_ID_FLAC        , 0xC1 }, /* nonstandard, update when there is a standard value */
     { AV_CODEC_ID_TSCC2       , 0xD0 }, /* nonstandard, camtasia uses it */
+    { AV_CODEC_ID_EVRC        , 0xD1 }, /* nonstandard, pvAuthor uses it */
     { AV_CODEC_ID_VORBIS      , 0xDD }, /* nonstandard, gpac uses it */
     { AV_CODEC_ID_DVD_SUBTITLE, 0xE0 }, /* nonstandard, see unsupported-embedded-subs-2.mp4 */
     { AV_CODEC_ID_QCELP       , 0xE1 },
@@ -160,6 +163,8 @@ const AVCodecTag ff_codec_movvideo_tags[] = {
 
     { AV_CODEC_ID_HEVC, MKTAG('h', 'e', 'v', '1') }, /* HEVC/H.265 which indicates parameter sets may be in ES */
     { AV_CODEC_ID_HEVC, MKTAG('h', 'v', 'c', '1') }, /* HEVC/H.265 which indicates parameter sets shall not be in ES */
+    { AV_CODEC_ID_HEVC, MKTAG('d', 'v', 'h', 'e') }, /* HEVC-based Dolby Vision derived from hev1 */
+                                                     /* dvh1 is handled within mov.c */
 
     { AV_CODEC_ID_H264, MKTAG('a', 'v', 'c', '1') }, /* AVC-1/H.264 */
     { AV_CODEC_ID_H264, MKTAG('a', 'v', 'c', '2') },
@@ -180,8 +185,14 @@ const AVCodecTag ff_codec_movvideo_tags[] = {
     { AV_CODEC_ID_H264, MKTAG('A', 'V', 'i', 'n') }, /* AVC-Intra with implicit SPS/PPS */
     { AV_CODEC_ID_H264, MKTAG('a', 'i', 'v', 'x') }, /* XAVC 10-bit 4:2:2 */
     { AV_CODEC_ID_H264, MKTAG('r', 'v', '6', '4') }, /* X-Com Radvision */
+    { AV_CODEC_ID_H264, MKTAG('x', 'a', 'l', 'g') }, /* XAVC-L HD422 produced by FCP */
+    { AV_CODEC_ID_H264, MKTAG('a', 'v', 'l', 'g') }, /* Panasonic P2 AVC-LongG */
+    { AV_CODEC_ID_H264, MKTAG('d', 'v', 'a', '1') }, /* AVC-based Dolby Vision derived from avc1 */
+    { AV_CODEC_ID_H264, MKTAG('d', 'v', 'a', 'v') }, /* AVC-based Dolby Vision derived from avc3 */
 
+    { AV_CODEC_ID_VP8,  MKTAG('v', 'p', '0', '8') }, /* VP8 */
     { AV_CODEC_ID_VP9,  MKTAG('v', 'p', '0', '9') }, /* VP9 */
+    { AV_CODEC_ID_AV1,  MKTAG('a', 'v', '0', '1') }, /* AV1 */
 
     { AV_CODEC_ID_MPEG1VIDEO, MKTAG('m', '1', 'v', ' ') },
     { AV_CODEC_ID_MPEG1VIDEO, MKTAG('m', '1', 'v', '1') }, /* Apple MPEG-1 Camcorder */
@@ -269,10 +280,16 @@ const AVCodecTag ff_codec_movvideo_tags[] = {
     { AV_CODEC_ID_HAP, MKTAG('H', 'a', 'p', '1') },
     { AV_CODEC_ID_HAP, MKTAG('H', 'a', 'p', '5') },
     { AV_CODEC_ID_HAP, MKTAG('H', 'a', 'p', 'Y') },
+    { AV_CODEC_ID_HAP, MKTAG('H', 'a', 'p', 'A') },
+    { AV_CODEC_ID_HAP, MKTAG('H', 'a', 'p', 'M') },
 
     { AV_CODEC_ID_DXV, MKTAG('D', 'X', 'D', '3') },
     { AV_CODEC_ID_DXV, MKTAG('D', 'X', 'D', 'I') },
 
+    { AV_CODEC_ID_MAGICYUV, MKTAG('M', '0', 'R', '0') },
+    { AV_CODEC_ID_MAGICYUV, MKTAG('M', '0', 'R', 'A') },
+    { AV_CODEC_ID_MAGICYUV, MKTAG('M', '0', 'R', 'G') },
+    { AV_CODEC_ID_MAGICYUV, MKTAG('M', '0', 'Y', '2') },
     { AV_CODEC_ID_MAGICYUV, MKTAG('M', '8', 'R', 'G') },
     { AV_CODEC_ID_MAGICYUV, MKTAG('M', '8', 'R', 'A') },
     { AV_CODEC_ID_MAGICYUV, MKTAG('M', '8', 'G', '0') },
@@ -280,6 +297,8 @@ const AVCodecTag ff_codec_movvideo_tags[] = {
     { AV_CODEC_ID_MAGICYUV, MKTAG('M', '8', 'Y', '2') },
     { AV_CODEC_ID_MAGICYUV, MKTAG('M', '8', 'Y', '4') },
     { AV_CODEC_ID_MAGICYUV, MKTAG('M', '8', 'Y', 'A') },
+    { AV_CODEC_ID_MAGICYUV, MKTAG('M', '2', 'R', 'A') },
+    { AV_CODEC_ID_MAGICYUV, MKTAG('M', '2', 'R', 'G') },
 
     { AV_CODEC_ID_SHEERVIDEO, MKTAG('S', 'h', 'r', '0') },
     { AV_CODEC_ID_SHEERVIDEO, MKTAG('S', 'h', 'r', '1') },
@@ -289,6 +308,8 @@ const AVCodecTag ff_codec_movvideo_tags[] = {
     { AV_CODEC_ID_SHEERVIDEO, MKTAG('S', 'h', 'r', '5') },
     { AV_CODEC_ID_SHEERVIDEO, MKTAG('S', 'h', 'r', '6') },
     { AV_CODEC_ID_SHEERVIDEO, MKTAG('S', 'h', 'r', '7') },
+
+    { AV_CODEC_ID_PIXLET, MKTAG('p', 'x', 'l', 't') },
 
     { AV_CODEC_ID_NONE, 0 },
 };
@@ -304,6 +325,7 @@ const AVCodecTag ff_codec_movaudio_tags[] = {
     { AV_CODEC_ID_DTS,             MKTAG('d', 't', 's', 'c') }, /* DTS formats prior to DTS-HD */
     { AV_CODEC_ID_DTS,             MKTAG('d', 't', 's', 'h') }, /* DTS-HD audio formats */
     { AV_CODEC_ID_DTS,             MKTAG('d', 't', 's', 'l') }, /* DTS-HD Lossless formats */
+    { AV_CODEC_ID_DTS,             MKTAG('d', 't', 's', 'e') }, /* DTS Express */
     { AV_CODEC_ID_DTS,             MKTAG('D', 'T', 'S', ' ') }, /* non-standard */
     { AV_CODEC_ID_EAC3,            MKTAG('e', 'c', '-', '3') }, /* ETSI TS 102 366 Annex F (only valid in ISOBMFF) */
     { AV_CODEC_ID_DVAUDIO,         MKTAG('v', 'd', 'v', 'a') },
@@ -342,9 +364,11 @@ const AVCodecTag ff_codec_movaudio_tags[] = {
     { AV_CODEC_ID_QDMC,            MKTAG('Q', 'D', 'M', 'C') },
     { AV_CODEC_ID_SPEEX,           MKTAG('s', 'p', 'e', 'x') }, /* Flash Media Server */
     { AV_CODEC_ID_SPEEX,           MKTAG('S', 'P', 'X', 'N') }, /* ZygoAudio (quality 10 mode) */
-    { AV_CODEC_ID_WMAV2,           MKTAG('W', 'M', 'A', '2') },
     { AV_CODEC_ID_EVRC,            MKTAG('s', 'e', 'v', 'c') }, /* 3GPP2 */
     { AV_CODEC_ID_SMV,             MKTAG('s', 's', 'm', 'v') }, /* 3GPP2 */
+    { AV_CODEC_ID_FLAC,            MKTAG('f', 'L', 'a', 'C') }, /* nonstandard */
+    { AV_CODEC_ID_TRUEHD,          MKTAG('m', 'l', 'p', 'a') }, /* mp4ra.org */
+    { AV_CODEC_ID_OPUS,            MKTAG('O', 'p', 'u', 's') }, /* mp4ra.org */
     { AV_CODEC_ID_NONE, 0 },
 };
 
@@ -352,6 +376,11 @@ const AVCodecTag ff_codec_movsubtitle_tags[] = {
     { AV_CODEC_ID_MOV_TEXT, MKTAG('t', 'e', 'x', 't') },
     { AV_CODEC_ID_MOV_TEXT, MKTAG('t', 'x', '3', 'g') },
     { AV_CODEC_ID_EIA_608,  MKTAG('c', '6', '0', '8') },
+    { AV_CODEC_ID_NONE, 0 },
+};
+
+const AVCodecTag ff_codec_movdata_tags[] = {
+    { AV_CODEC_ID_BIN_DATA, MKTAG('g', 'p', 'm', 'd') },
     { AV_CODEC_ID_NONE, 0 },
 };
 
@@ -502,19 +531,26 @@ FF_ENABLE_DEPRECATION_WARNINGS
     codec_id= ff_codec_get_id(ff_mp4_obj_type, object_type_id);
     if (codec_id)
         st->codecpar->codec_id = codec_id;
+    if (object_type_id == 0x6B) // This can be either MP3 or MP2; let probe_codec decide
+        st->request_probe = 5;
     av_log(fc, AV_LOG_TRACE, "esds object type id 0x%02x\n", object_type_id);
     len = ff_mp4_read_descr(fc, pb, &tag);
     if (tag == MP4DecSpecificDescrTag) {
         av_log(fc, AV_LOG_TRACE, "Specific MPEG-4 header len=%d\n", len);
+        /* As per 14496-3:2009 9.D.2.2, No decSpecificInfo is defined
+           for MPEG-1 Audio or MPEG-2 Audio; MPEG-2 AAC excluded. */
+        if (object_type_id == 0x69 || object_type_id == 0x6b)
+            return 0;
         if (!len || (uint64_t)len > (1<<30))
-            return -1;
-        av_free(st->codecpar->extradata);
+            return AVERROR_INVALIDDATA;
         if ((ret = ff_get_extradata(fc, st->codecpar, pb, len)) < 0)
             return ret;
         if (st->codecpar->codec_id == AV_CODEC_ID_AAC) {
             MPEG4AudioConfig cfg = {0};
-            avpriv_mpeg4audio_get_config(&cfg, st->codecpar->extradata,
-                                         st->codecpar->extradata_size * 8, 1);
+            ret = avpriv_mpeg4audio_get_config(&cfg, st->codecpar->extradata,
+                                               st->codecpar->extradata_size * 8, 1);
+            if (ret < 0)
+                return ret;
             st->codecpar->channels = cfg.channels;
             if (cfg.object_type == 29 && cfg.sampling_index < 3) // old mp3on4
                 st->codecpar->sample_rate = avpriv_mpa_freq_tab[cfg.sampling_index];
@@ -623,6 +659,97 @@ void ff_mov_write_chan(AVIOContext *pb, int64_t channel_layout)
         avio_wb32(pb, channel_layout);
     }
     avio_wb32(pb, 0);              // mNumberChannelDescriptions
+}
+
+int ff_mov_parse_dvcc_dvvc(AVStream *st, GetBitContext *gb, void *log_ctx)
+{
+    AVDOVIDecoderConfigurationRecord *dovi;
+    size_t dovi_size;
+    int ret;
+
+    if (gb->size_in_bits < 32)
+        return AVERROR_INVALIDDATA;
+
+    dovi = av_dovi_alloc(&dovi_size);
+    if (!dovi)
+        return AVERROR(ENOMEM);
+
+    dovi->dv_version_major = get_bits(gb, 8);
+    dovi->dv_version_minor = get_bits(gb, 8);
+
+    dovi->dv_profile        = get_bits(gb, 7);
+    dovi->dv_level          = get_bits(gb, 6);
+    dovi->rpu_present_flag  = get_bits1(gb);
+    dovi->el_present_flag   = get_bits1(gb);
+    dovi->bl_present_flag   = get_bits1(gb);
+    if (gb->size_in_bits >= 24 * 8) {
+        dovi->dv_bl_signal_compatibility_id = get_bits(gb, 4);
+    } else {
+        // 0 stands for None
+        // Dolby Vision V1.2.93 profiles and levels
+        dovi->dv_bl_signal_compatibility_id = 0;
+    }
+
+    ret = av_stream_add_side_data(st, AV_PKT_DATA_DOVI_CONF,
+                                  (uint8_t *)dovi, dovi_size);
+    if (ret < 0) {
+        av_free(dovi);
+        return ret;
+    }
+
+    av_log(log_ctx, AV_LOG_TRACE, "DOVI in dvcC/dvvC box, version: %d.%d, profile: %d, level: %d, "
+           "rpu flag: %d, el flag: %d, bl flag: %d, compatibility id: %d\n",
+           dovi->dv_version_major, dovi->dv_version_minor,
+           dovi->dv_profile, dovi->dv_level,
+           dovi->rpu_present_flag,
+           dovi->el_present_flag,
+           dovi->bl_present_flag,
+           dovi->dv_bl_signal_compatibility_id
+        );
+
+    return 0;
+}
+
+int ff_mov_put_dvcc_dvvc(uint8_t *out, int size, uint32_t *type,
+                         AVDOVIDecoderConfigurationRecord *dovi, void *log_ctx)
+{
+    PutBitContext pb;
+    init_put_bits(&pb, out, size);
+
+    if (size < MOV_DVCC_DVVC_SIZE)
+        return AVERROR(EINVAL);
+
+    if (dovi->dv_profile > 7)
+        *type = MKBETAG('d', 'v', 'v', 'C');
+    else
+        *type = MKBETAG('d', 'v', 'c', 'C');
+
+    put_bits(&pb, 8, dovi->dv_version_major);
+    put_bits(&pb, 8, dovi->dv_version_minor);
+    put_bits(&pb, 7, dovi->dv_profile);
+    put_bits(&pb, 6, dovi->dv_level);
+    put_bits(&pb, 1, dovi->rpu_present_flag);
+    put_bits(&pb, 1, dovi->el_present_flag);
+    put_bits(&pb, 1, dovi->bl_present_flag);
+    put_bits(&pb, 4, dovi->dv_bl_signal_compatibility_id);
+    put_bits(&pb, 28, 0); /* reserved */
+    put_bits32(&pb, 0); /* reserved */
+    put_bits32(&pb, 0); /* reserved */
+    put_bits32(&pb, 0); /* reserved */
+    put_bits32(&pb, 0); /* reserved */
+    flush_put_bits(&pb);
+
+    av_log(log_ctx, AV_LOG_DEBUG, "DOVI in %s box, version: %d.%d, profile: %d, level: %d, "
+           "rpu flag: %d, el flag: %d, bl flag: %d, compatibility id: %d\n",
+           dovi->dv_profile > 7 ? "dvvC" : "dvcC",
+           dovi->dv_version_major, dovi->dv_version_minor,
+           dovi->dv_profile, dovi->dv_level,
+           dovi->rpu_present_flag,
+           dovi->el_present_flag,
+           dovi->bl_present_flag,
+           dovi->dv_bl_signal_compatibility_id);
+
+    return put_bits_count(&pb) / 8;
 }
 
 const struct AVCodecTag *avformat_get_mov_video_tags(void)

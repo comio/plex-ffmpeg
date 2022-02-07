@@ -21,8 +21,8 @@
  */
 
 #include <dlfcn.h>
+#include <stdatomic.h>
 
-#include "libavutil/atomic.h"
 #include "libavutil/avassert.h"
 #include "libavutil/thread.h"
 #include "mediacodecndk.h"
@@ -70,26 +70,76 @@ const char* ff_mediacodecndk_get_mime(enum AVCodecID codec_id)
         return "video/avc";
     case AV_CODEC_ID_HEVC:
         return "video/hevc";
+    case AV_CODEC_ID_MP3:
+        return "audio/mpeg";
     case AV_CODEC_ID_MPEG2VIDEO:
         return "video/mpeg2";
+    case AV_CODEC_ID_MPEG4:
+        return "video/mp4v-es";
+    case AV_CODEC_ID_VC1:
+        return "video/vc1";
+    case AV_CODEC_ID_VP8:
+        return "video/x-vnd.on2.vp8";
+    case AV_CODEC_ID_VP9:
+        return "video/x-vnd.on2.vp9";
     default:
         av_assert0(!"Unsupported codec ID");
         return NULL;
     }
 }
 
-static volatile int ret = 0;
+static atomic_int ret = 0;
 static AVOnce ff_mediacodec_init_once = AV_ONCE_INIT;
+
+static int ff_mediacodecndk_init_binder_imp(void)
+{
+    const char* libname;
+    const char* funname;
+    void *lib;
+    void (*thread_pool_start)(void);
+
+    libname = getenv("MEDIACODECNDK_BINDER_LIB");
+    if (!libname || !libname[0]) {
+        av_log(NULL, AV_LOG_ERROR, "No valid MEDIACODECNDK_BINDER_LIB provided\n");
+        return AVERROR_ENCODER_NOT_FOUND;
+    }
+
+    funname = getenv("MEDIACODECNDK_BINDER_FUNCTION");
+    if (!funname || !funname[0]) {
+        av_log(NULL, AV_LOG_ERROR, "No valid MEDIACODECNDK_BINDER_FUNCTION provided\n");
+        return AVERROR_ENCODER_NOT_FOUND;
+    }
+
+    lib = dlopen(libname, RTLD_NOW | RTLD_GLOBAL);
+    if (!lib) {
+        av_log(NULL, AV_LOG_ERROR, "MediaCodecNDK binder library (%s) not loaded\n", libname);
+        return AVERROR_ENCODER_NOT_FOUND;
+    }
+
+    thread_pool_start = dlsym(lib, funname);
+    if (!thread_pool_start) {
+        av_log(NULL, AV_LOG_ERROR, "MediaCodecNDK binder function (%s) not found in (%s)\n", funname, libname);
+        return AVERROR_ENCODER_NOT_FOUND;
+    }
+
+    thread_pool_start();
+    return 0;
+}
 
 static void ff_mediacodecndk_init_binder_once(void)
 {
+  // If this env var is not set, assume we're running on SHIELD, with an older java wrapper which hasn't
+  // set up the env vars. To be removed when the kamino kepler-server changes are merged to master.
+  //
+  if (!getenv("MEDIACODECNDK_BINDER_LIB"))
+  {
     void *lib = dlopen("ndkbinderutil.so", RTLD_NOW | RTLD_GLOBAL);
     void (*thread_pool_start)(void);
     if (!lib)
         lib = dlopen("nvtranscode.so", RTLD_NOW | RTLD_GLOBAL);
     if (!lib) {
         av_log(NULL, AV_LOG_ERROR, "Binder initialization library not found\n");
-        avpriv_atomic_int_set(&ret, AVERROR_ENCODER_NOT_FOUND);
+        atomic_store_explicit(&ret, AVERROR_ENCODER_NOT_FOUND, memory_order_relaxed);
         return;
     }
     thread_pool_start = dlsym(lib, "NdkBinderUtilThreadCreate");
@@ -97,14 +147,21 @@ static void ff_mediacodecndk_init_binder_once(void)
         thread_pool_start = dlsym(lib, "NvTranscodeThreadCreate");
     if (!thread_pool_start) {
         av_log(NULL, AV_LOG_ERROR, "Binder initialization function not found\n");
-        avpriv_atomic_int_set(&ret, AVERROR_ENCODER_NOT_FOUND);
+        atomic_store_explicit(&ret, AVERROR_ENCODER_NOT_FOUND, memory_order_relaxed);
         return;
     }
     thread_pool_start();
+  }
+  else
+  {
+    int result = ff_mediacodecndk_init_binder_imp();
+    if (result)
+        atomic_store_explicit(&ret, result, memory_order_relaxed);
+  }
 }
 
 int ff_mediacodecndk_init_binder(void)
 {
     ff_thread_once(&ff_mediacodec_init_once, ff_mediacodecndk_init_binder_once);
-    return avpriv_atomic_int_get(&ret);
+    return atomic_load_explicit(&ret, memory_order_relaxed);
 }

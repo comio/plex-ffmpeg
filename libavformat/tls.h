@@ -22,11 +22,9 @@
 #ifndef AVFORMAT_TLS_H
 #define AVFORMAT_TLS_H
 
-#include "config.h"
-#include "url.h"
 #include "libavutil/opt.h"
 
-#define CONFIG_TLS_PROTOCOL (CONFIG_TLS_GNUTLS_PROTOCOL | CONFIG_TLS_OPENSSL_PROTOCOL | CONFIG_TLS_SECURETRANSPORT_PROTOCOL | CONFIG_TLS_SCHANNEL_PROTOCOL)
+#include "url.h"
 
 typedef struct TLSShared {
     char *ca_file;
@@ -52,6 +50,21 @@ typedef struct TLSShared {
     {"key_file",   "Private key file",                    offsetof(pstruct, options_field . key_file),  AV_OPT_TYPE_STRING, .flags = TLS_OPTFL }, \
     {"listen",     "Listen for incoming connections",     offsetof(pstruct, options_field . listen),    AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, .flags = TLS_OPTFL }, \
     {"verifyhost", "Verify against a specific hostname",  offsetof(pstruct, options_field . host),      AV_OPT_TYPE_STRING, .flags = TLS_OPTFL }
+
+#define TLS_CLASS(pstruct, options_field) \
+static void *tls_child_next(void *obj, void *prev) \
+{ \
+    pstruct *s = obj; \
+    return prev ? NULL : s->options_field.tcp; \
+} \
+static const AVClass tls_class = { \
+    .class_name = "tls", \
+    .item_name  = av_default_item_name, \
+    .option     = options, \
+    .version    = LIBAVUTIL_VERSION_INT, \
+    .child_next = tls_child_next, \
+}; \
+
 
 int ff_tls_open_underlying(TLSShared *c, URLContext *parent, const char *uri, AVDictionary **options);
 

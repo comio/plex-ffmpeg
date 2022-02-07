@@ -271,19 +271,8 @@ void av_bprint_escape(AVBPrint *dstbuf, const char *src, const char *special_cha
         mode = AV_ESCAPE_MODE_BACKSLASH; /* TODO: implement a heuristic */
 
     switch (mode) {
-    case AV_ESCAPE_MODE_QUOTE:
-        /* enclose the string between '' */
-        av_bprint_chars(dstbuf, '\'', 1);
-        for (; *src; src++) {
-            if (*src == '\'')
-                av_bprintf(dstbuf, "'\\''");
-            else
-                av_bprint_chars(dstbuf, *src, 1);
-        }
-        av_bprint_chars(dstbuf, '\'', 1);
-        break;
-
     /* case AV_ESCAPE_MODE_BACKSLASH or unknown mode */
+    case AV_ESCAPE_MODE_BACKSLASH:
     default:
         /* \-escape characters */
         for (; *src; src++) {
@@ -299,6 +288,72 @@ void av_bprint_escape(AVBPrint *dstbuf, const char *src, const char *special_cha
                  (is_special || (is_ws && is_first_last))))
                 av_bprint_chars(dstbuf, '\\', 1);
             av_bprint_chars(dstbuf, *src, 1);
+        }
+        break;
+
+    case AV_ESCAPE_MODE_QUOTE:
+        /* enclose the string between '' */
+        av_bprint_chars(dstbuf, '\'', 1);
+        for (; *src; src++) {
+            if (*src == '\'')
+                av_bprintf(dstbuf, "'\\''");
+            else
+                av_bprint_chars(dstbuf, *src, 1);
+        }
+        av_bprint_chars(dstbuf, '\'', 1);
+        break;
+
+    case AV_ESCAPE_MODE_XML:
+        /* &;-escape characters */
+        while (*src) {
+            uint8_t tmp;
+            uint32_t cp;
+            const char *src1 = src;
+            GET_UTF8(cp, (uint8_t)*src++, goto err;);
+
+            if ((cp < 0xFF &&
+                 ((special_chars && strchr(special_chars, cp)) ||
+                  (flags & AV_ESCAPE_FLAG_WHITESPACE) && strchr(WHITESPACES, cp))) ||
+                (!(flags & AV_ESCAPE_FLAG_STRICT) &&
+                 (cp == '&' || cp == '<' || cp == '>')) ||
+                ((flags & AV_ESCAPE_FLAG_ESCAPE_SINGLE_QUOTE) && cp == '\'') ||
+                ((flags & AV_ESCAPE_FLAG_ESCAPE_DOUBLE_QUOTE) && cp == '"') ||
+                ((flags & AV_ESCAPE_FLAG_NON_ASCII) && (cp < 0x20 || cp > 0x7e))) {
+                switch (cp) {
+                case '&' : av_bprintf(dstbuf, "&amp;");  break;
+                case '<' : av_bprintf(dstbuf, "&lt;");   break;
+                case '>' : av_bprintf(dstbuf, "&gt;");   break;
+                case '"' : av_bprintf(dstbuf, "&quot;"); break;
+                case '\'': av_bprintf(dstbuf, "&apos;"); break;
+                default:   av_bprintf(dstbuf, "&#x%"PRIx32";", cp); break;
+                }
+            } else {
+                PUT_UTF8(cp, tmp, av_bprint_chars(dstbuf, tmp, 1);)
+            }
+            continue;
+        err:
+            if (flags & AV_ESCAPE_FLAG_REPLACE_INVALID_ASCII) {
+                av_bprint_chars(dstbuf, '?', 1);
+            } else if (flags & AV_ESCAPE_FLAG_REPLACE_INVALID_SEQUENCES) {
+                if (flags & AV_ESCAPE_FLAG_NON_ASCII)
+                    av_bprintf(dstbuf, "\xEF\xBF\xBD");
+                else
+                    av_bprintf(dstbuf, "&#xfffd;");
+            } else {
+                while (src1 < src)
+                    av_bprint_chars(dstbuf, *src1++, 1);
+            }
+        }
+        break;
+
+    case AV_ESCAPE_MODE_URL:
+        for (; *src; src++) {
+            int is_strictly_special = special_chars && strchr(special_chars, *src);
+            if (is_strictly_special ||
+                (!(flags & AV_ESCAPE_FLAG_STRICT) && !strchr("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~", *src)))
+                av_bprintf(dstbuf, "%%%02X", *src);
+            else
+                av_bprint_chars(dstbuf, *src, 1);
         }
         break;
     }

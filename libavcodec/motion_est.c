@@ -313,26 +313,6 @@ int ff_init_me(MpegEncContext *s){
         return -1;
     }
 
-#if FF_API_MOTION_EST
-    //special case of snow is needed because snow uses its own iterative ME code
-FF_DISABLE_DEPRECATION_WARNINGS
-    if (s->motion_est == FF_ME_EPZS) {
-        if (s->me_method == ME_ZERO)
-            s->motion_est = FF_ME_ZERO;
-        else if (s->me_method == ME_EPZS)
-            s->motion_est = FF_ME_EPZS;
-        else if (s->me_method == ME_X1)
-            s->motion_est = FF_ME_XONE;
-        else if (s->avctx->codec_id != AV_CODEC_ID_SNOW) {
-            av_log(s->avctx, AV_LOG_ERROR,
-                   "me_method is only allowed to be set to zero and epzs; "
-                   "for hex,umh,full and others see dia_size\n");
-            return -1;
-        }
-    }
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
-
     c->avctx= s->avctx;
 
     if(s->codec_id == AV_CODEC_ID_H261)
@@ -653,7 +633,7 @@ static inline int h263_mv4_search(MpegEncContext *s, int mx, int my, int shift)
                 if(P[i][1] > (c->ymax<<shift)) P[i][1]= (c->ymax<<shift);
             }
 
-        dmin4 = epzs_motion_search4(s, &mx4, &my4, P, block, block, s->p_mv_table, (1<<16)>>shift);
+        dmin4 = epzs_motion_search2(s, &mx4, &my4, P, block, block, s->p_mv_table, (1<<16)>>shift, 1);
 
         dmin4= c->sub_motion_search(s, &mx4, &my4, dmin4, block, block, size, h);
 
@@ -815,7 +795,7 @@ static int interlaced_search(MpegEncContext *s, int ref_index,
             P_MV1[0]= mx; //FIXME not correct if block != field_select
             P_MV1[1]= my / 2;
 
-            dmin = epzs_motion_search2(s, &mx_i, &my_i, P, block, field_select+ref_index, mv_table, (1<<16)>>1);
+            dmin = epzs_motion_search2(s, &mx_i, &my_i, P, block, field_select+ref_index, mv_table, (1<<16)>>1, 0);
 
             dmin= c->sub_motion_search(s, &mx_i, &my_i, dmin, block, field_select+ref_index, size, h);
 
@@ -956,10 +936,10 @@ void ff_estimate_p_frame_motion(MpegEncContext * s,
             P_TOPRIGHT[1] = s->current_picture.motion_val[0][mot_xy - mot_stride + 2][1];
             if (P_TOP[1] > (c->ymax << shift))
                 P_TOP[1] =  c->ymax << shift;
-            if (P_TOPRIGHT[0] < (c->xmin << shift))
-                P_TOPRIGHT[0] =  c->xmin << shift;
-            if (P_TOPRIGHT[1] > (c->ymax << shift))
-                P_TOPRIGHT[1] =  c->ymax << shift;
+            if (P_TOPRIGHT[0] < (c->xmin * (1 << shift)))
+                P_TOPRIGHT[0] =  c->xmin * (1 << shift);
+            if (P_TOPRIGHT[1] > (c->ymax * (1 << shift)))
+                P_TOPRIGHT[1] =  c->ymax * (1 << shift);
 
             P_MEDIAN[0] = mid_pred(P_LEFT[0], P_TOP[0], P_TOPRIGHT[0]);
             P_MEDIAN[1] = mid_pred(P_LEFT[1], P_TOP[1], P_TOPRIGHT[1]);

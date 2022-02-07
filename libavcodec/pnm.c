@@ -24,6 +24,7 @@
 
 #include "libavutil/imgutils.h"
 #include "avcodec.h"
+#include "internal.h"
 #include "pnm.h"
 
 static inline int pnm_space(int c)
@@ -35,13 +36,15 @@ static void pnm_get(PNMContext *sc, char *str, int buf_size)
 {
     char *s;
     int c;
+    uint8_t *bs  = sc->bytestream;
+    const uint8_t *end = sc->bytestream_end;
 
     /* skip spaces and comments */
-    while (sc->bytestream < sc->bytestream_end) {
-        c = *sc->bytestream++;
+    while (bs < end) {
+        c = *bs++;
         if (c == '#')  {
-            while (c != '\n' && sc->bytestream < sc->bytestream_end) {
-                c = *sc->bytestream++;
+            while (c != '\n' && bs < end) {
+                c = *bs++;
             }
         } else if (!pnm_space(c)) {
             break;
@@ -49,18 +52,21 @@ static void pnm_get(PNMContext *sc, char *str, int buf_size)
     }
 
     s = str;
-    while (sc->bytestream < sc->bytestream_end && !pnm_space(c)) {
-        if ((s - str)  < buf_size - 1)
-            *s++ = c;
-        c = *sc->bytestream++;
+    while (bs < end && !pnm_space(c) && (s - str) < buf_size - 1) {
+        *s++ = c;
+        c = *bs++;
     }
     *s = '\0';
+    while (bs < end && !pnm_space(c))
+        c = *bs++;
+    sc->bytestream = bs;
 }
 
 int ff_pnm_decode_header(AVCodecContext *avctx, PNMContext * const s)
 {
     char buf1[32], tuple_type[32];
     int h, w, depth, maxval;
+    int ret;
 
     pnm_get(s, buf1, sizeof(buf1));
     if(buf1[0] != 'P')
@@ -107,11 +113,13 @@ int ff_pnm_decode_header(AVCodecContext *avctx, PNMContext * const s)
             }
         }
         /* check that all tags are present */
-        if (w <= 0 || h <= 0 || maxval <= 0 || depth <= 0 || tuple_type[0] == '\0' || av_image_check_size(w, h, 0, avctx) || s->bytestream >= s->bytestream_end)
+        if (w <= 0 || h <= 0 || maxval <= 0 || maxval > UINT16_MAX || depth <= 0 || tuple_type[0] == '\0' ||
+            av_image_check_size(w, h, 0, avctx) || s->bytestream >= s->bytestream_end)
             return AVERROR_INVALIDDATA;
 
-        avctx->width  = w;
-        avctx->height = h;
+        ret = ff_set_dimensions(avctx, w, h);
+        if (ret < 0)
+            return ret;
         s->maxval     = maxval;
         if (depth == 1) {
             if (maxval == 1) {
@@ -153,13 +161,14 @@ int ff_pnm_decode_header(AVCodecContext *avctx, PNMContext * const s)
     if(w <= 0 || h <= 0 || av_image_check_size(w, h, 0, avctx) || s->bytestream >= s->bytestream_end)
         return AVERROR_INVALIDDATA;
 
-    avctx->width  = w;
-    avctx->height = h;
+    ret = ff_set_dimensions(avctx, w, h);
+    if (ret < 0)
+        return ret;
 
     if (avctx->pix_fmt != AV_PIX_FMT_MONOWHITE && avctx->pix_fmt != AV_PIX_FMT_MONOBLACK) {
         pnm_get(s, buf1, sizeof(buf1));
         s->maxval = atoi(buf1);
-        if (s->maxval <= 0) {
+        if (s->maxval <= 0 || s->maxval > UINT16_MAX) {
             av_log(avctx, AV_LOG_ERROR, "Invalid maxval: %d\n", s->maxval);
             s->maxval = 255;
         }

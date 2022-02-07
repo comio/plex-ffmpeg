@@ -32,6 +32,7 @@ static int pnm_parse(AVCodecParserContext *s, AVCodecContext *avctx,
     ParseContext *pc = s->priv_data;
     PNMContext pnmctx;
     int next;
+    int skip = 0;
 
     for (; pc->overread > 0; pc->overread--) {
         pc->buffer[pc->index++]= pc->buffer[pc->overread_index++];
@@ -43,39 +44,43 @@ retry:
         pnmctx.bytestream_end   = pc->buffer + pc->index;
     } else {
         pnmctx.bytestream_start =
-        pnmctx.bytestream       = (uint8_t *) buf; /* casts avoid warnings */
-        pnmctx.bytestream_end   = (uint8_t *) buf + buf_size;
+        pnmctx.bytestream       = (uint8_t *) buf + skip; /* casts avoid warnings */
+        pnmctx.bytestream_end   = (uint8_t *) buf + buf_size - skip;
     }
+    next = END_NOT_FOUND;
     if (ff_pnm_decode_header(avctx, &pnmctx) < 0) {
         if (pnmctx.bytestream < pnmctx.bytestream_end) {
             if (pc->index) {
                 pc->index = 0;
             } else {
-                buf++;
-                buf_size--;
+                unsigned step = FFMAX(1, pnmctx.bytestream - pnmctx.bytestream_start);
+
+                skip += step;
             }
             goto retry;
         }
-#if 0
-        if (pc->index && pc->index * 2 + AV_INPUT_BUFFER_PADDING_SIZE < pc->buffer_size && buf_size > pc->index) {
-            memcpy(pc->buffer + pc->index, buf, pc->index);
-            pc->index += pc->index;
-            buf       += pc->index;
-            buf_size  -= pc->index;
-            goto retry;
-        }
-#endif
-        next = END_NOT_FOUND;
     } else if (pnmctx.type < 4) {
-        next = END_NOT_FOUND;
+              uint8_t *bs  = pnmctx.bytestream;
+        const uint8_t *end = pnmctx.bytestream_end;
+
+        while (bs < end) {
+            int c = *bs++;
+            if (c == '#')  {
+                while (c != '\n' && bs < end)
+                    c = *bs++;
+            } else if (c == 'P') {
+                next = bs - pnmctx.bytestream_start + skip - 1;
+                break;
+            }
+        }
     } else {
-        next = pnmctx.bytestream - pnmctx.bytestream_start
+        next = pnmctx.bytestream - pnmctx.bytestream_start + skip
                + av_image_get_buffer_size(avctx->pix_fmt, avctx->width, avctx->height, 1);
-        if (pnmctx.bytestream_start != buf)
-            next -= pc->index;
-        if (next > buf_size)
-            next = END_NOT_FOUND;
     }
+    if (next != END_NOT_FOUND && pnmctx.bytestream_start != buf + skip)
+        next -= pc->index;
+    if (next > buf_size)
+        next = END_NOT_FOUND;
 
     if (ff_combine_frame(pc, next, &buf, &buf_size) < 0) {
         *poutbuf      = NULL;

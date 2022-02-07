@@ -33,6 +33,7 @@
 #include "libavutil/pixfmt.h"
 
 #include "avcodec.h"
+#include "hwaccel.h"
 #include "qsv_internal.h"
 
 typedef struct QSVContext {
@@ -51,11 +52,16 @@ typedef struct QSVContext {
     QSVFrame *work_frames;
 
     AVFifoBuffer *async_fifo;
+    int zero_consume_run;
+    int buffered_count;
+    int reinit_flag;
 
     // the internal parser and codec context for parsing the data
     AVCodecParserContext *parser;
     AVCodecContext *avctx_internal;
     enum AVPixelFormat orig_pix_fmt;
+    uint32_t fourcc;
+    mfxFrameInfo frame_info;
 
     // options set by the caller
     int async_depth;
@@ -67,7 +73,7 @@ typedef struct QSVContext {
     int         nb_ext_buffers;
 } QSVContext;
 
-int ff_qsv_map_pixfmt(enum AVPixelFormat format);
+extern const AVCodecHWConfigInternal *ff_qsv_hw_configs[];
 
 int ff_qsv_process_data(AVCodecContext *avctx, QSVContext *q,
                         AVFrame *frame, int *got_frame, AVPacket *pkt);

@@ -125,6 +125,10 @@ static av_cold int mp3lame_encode_init(AVCodecContext *avctx)
         }
     }
 
+    /* lowpass cutoff frequency */
+    if (avctx->cutoff)
+        lame_set_lowpassfreq(s->gfp, avctx->cutoff);
+
     /* do not get a Xing VBR header frame from LAME */
     lame_set_bWriteVbrTag(s->gfp,0);
 
@@ -345,4 +349,5 @@ AVCodec ff_libmp3lame_encoder = {
                                                   0 },
     .priv_class            = &libmp3lame_class,
     .defaults              = libmp3lame_defaults,
+    .wrapper_name          = "libmp3lame",
 };

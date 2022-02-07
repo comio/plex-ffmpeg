@@ -26,28 +26,30 @@
 
 int ff_h264_pred_weight_table(GetBitContext *gb, const SPS *sps,
                               const int *ref_count, int slice_type_nos,
-                              H264PredWeightTable *pwt, void *logctx)
+                              H264PredWeightTable *pwt,
+                              int picture_structure, void *logctx)
 {
     int list, i, j;
     int luma_def, chroma_def;
 
     pwt->use_weight             = 0;
     pwt->use_weight_chroma      = 0;
-    pwt->luma_log2_weight_denom = get_ue_golomb(gb);
-    if (sps->chroma_format_idc)
-        pwt->chroma_log2_weight_denom = get_ue_golomb(gb);
 
+    pwt->luma_log2_weight_denom = get_ue_golomb(gb);
     if (pwt->luma_log2_weight_denom > 7U) {
         av_log(logctx, AV_LOG_ERROR, "luma_log2_weight_denom %d is out of range\n", pwt->luma_log2_weight_denom);
         pwt->luma_log2_weight_denom = 0;
     }
-    if (pwt->chroma_log2_weight_denom > 7U) {
-        av_log(logctx, AV_LOG_ERROR, "chroma_log2_weight_denom %d is out of range\n", pwt->chroma_log2_weight_denom);
-        pwt->chroma_log2_weight_denom = 0;
-    }
+    luma_def = 1 << pwt->luma_log2_weight_denom;
 
-    luma_def   = 1 << pwt->luma_log2_weight_denom;
-    chroma_def = 1 << pwt->chroma_log2_weight_denom;
+    if (sps->chroma_format_idc) {
+        pwt->chroma_log2_weight_denom = get_ue_golomb(gb);
+        if (pwt->chroma_log2_weight_denom > 7U) {
+            av_log(logctx, AV_LOG_ERROR, "chroma_log2_weight_denom %d is out of range\n", pwt->chroma_log2_weight_denom);
+            pwt->chroma_log2_weight_denom = 0;
+        }
+        chroma_def = 1 << pwt->chroma_log2_weight_denom;
+    }
 
     for (list = 0; list < 2; list++) {
         pwt->luma_weight_flag[list]   = 0;
@@ -59,6 +61,9 @@ int ff_h264_pred_weight_table(GetBitContext *gb, const SPS *sps,
             if (luma_weight_flag) {
                 pwt->luma_weight[i][list][0] = get_se_golomb(gb);
                 pwt->luma_weight[i][list][1] = get_se_golomb(gb);
+                if ((int8_t)pwt->luma_weight[i][list][0] != pwt->luma_weight[i][list][0] ||
+                    (int8_t)pwt->luma_weight[i][list][1] != pwt->luma_weight[i][list][1])
+                    goto out_range_weight;
                 if (pwt->luma_weight[i][list][0] != luma_def ||
                     pwt->luma_weight[i][list][1] != 0) {
                     pwt->use_weight             = 1;
@@ -76,6 +81,12 @@ int ff_h264_pred_weight_table(GetBitContext *gb, const SPS *sps,
                     for (j = 0; j < 2; j++) {
                         pwt->chroma_weight[i][list][j][0] = get_se_golomb(gb);
                         pwt->chroma_weight[i][list][j][1] = get_se_golomb(gb);
+                        if ((int8_t)pwt->chroma_weight[i][list][j][0] != pwt->chroma_weight[i][list][j][0] ||
+                            (int8_t)pwt->chroma_weight[i][list][j][1] != pwt->chroma_weight[i][list][j][1]) {
+                            pwt->chroma_weight[i][list][j][0] = chroma_def;
+                            pwt->chroma_weight[i][list][j][1] = 0;
+                            goto out_range_weight;
+                        }
                         if (pwt->chroma_weight[i][list][j][0] != chroma_def ||
                             pwt->chroma_weight[i][list][j][1] != 0) {
                             pwt->use_weight_chroma        = 1;
@@ -92,11 +103,15 @@ int ff_h264_pred_weight_table(GetBitContext *gb, const SPS *sps,
             }
 
             // for MBAFF
-            pwt->luma_weight[16 + 2 * i][list][0] = pwt->luma_weight[16 + 2 * i + 1][list][0] = pwt->luma_weight[i][list][0];
-            pwt->luma_weight[16 + 2 * i][list][1] = pwt->luma_weight[16 + 2 * i + 1][list][1] = pwt->luma_weight[i][list][1];
-            for (j = 0; j < 2; j++) {
-                pwt->chroma_weight[16 + 2 * i][list][j][0] = pwt->chroma_weight[16 + 2 * i + 1][list][j][0] = pwt->chroma_weight[i][list][j][0];
-                pwt->chroma_weight[16 + 2 * i][list][j][1] = pwt->chroma_weight[16 + 2 * i + 1][list][j][1] = pwt->chroma_weight[i][list][j][1];
+            if (picture_structure == PICT_FRAME) {
+                pwt->luma_weight[16 + 2 * i][list][0] = pwt->luma_weight[16 + 2 * i + 1][list][0] = pwt->luma_weight[i][list][0];
+                pwt->luma_weight[16 + 2 * i][list][1] = pwt->luma_weight[16 + 2 * i + 1][list][1] = pwt->luma_weight[i][list][1];
+                if (sps->chroma_format_idc) {
+                    for (j = 0; j < 2; j++) {
+                        pwt->chroma_weight[16 + 2 * i][list][j][0] = pwt->chroma_weight[16 + 2 * i + 1][list][j][0] = pwt->chroma_weight[i][list][j][0];
+                        pwt->chroma_weight[16 + 2 * i][list][j][1] = pwt->chroma_weight[16 + 2 * i + 1][list][j][1] = pwt->chroma_weight[i][list][j][1];
+                    }
+                }
             }
         }
         if (slice_type_nos != AV_PICTURE_TYPE_B)
@@ -104,6 +119,9 @@ int ff_h264_pred_weight_table(GetBitContext *gb, const SPS *sps,
     }
     pwt->use_weight = pwt->use_weight || pwt->use_weight_chroma;
     return 0;
+out_range_weight:
+    avpriv_request_sample(logctx, "Out of range weight");
+    return AVERROR_INVALIDDATA;
 }
 
 /**
@@ -224,18 +242,23 @@ int ff_h264_parse_ref_count(int *plist_count, int ref_count[2],
                 ref_count[1] = 1;
         }
 
-        if (ref_count[0] - 1 > max[0] || ref_count[1] - 1 > max[1]) {
+        if (slice_type_nos == AV_PICTURE_TYPE_B)
+            list_count = 2;
+        else
+            list_count = 1;
+
+        if (ref_count[0] - 1 > max[0] || (list_count == 2 && (ref_count[1] - 1 > max[1]))) {
             av_log(logctx, AV_LOG_ERROR, "reference overflow %u > %u or %u > %u\n",
                    ref_count[0] - 1, max[0], ref_count[1] - 1, max[1]);
             ref_count[0] = ref_count[1] = 0;
             *plist_count = 0;
             goto fail;
+        } else if (ref_count[1] - 1 > max[1]) {
+            av_log(logctx, AV_LOG_DEBUG, "reference overflow %u > %u \n",
+                   ref_count[1] - 1, max[1]);
+            ref_count[1] = 0;
         }
 
-        if (slice_type_nos == AV_PICTURE_TYPE_B)
-            list_count = 2;
-        else
-            list_count = 1;
     } else {
         list_count   = 0;
         ref_count[0] = ref_count[1] = 0;
@@ -256,7 +279,7 @@ int ff_h264_init_poc(int pic_field_poc[2], int *pic_poc,
                      int picture_structure, int nal_ref_idc)
 {
     const int max_frame_num = 1 << sps->log2_max_frame_num;
-    int field_poc[2];
+    int64_t field_poc[2];
 
     pc->frame_num_offset = pc->prev_frame_num_offset;
     if (pc->frame_num < pc->prev_frame_num)
@@ -322,6 +345,10 @@ int ff_h264_init_poc(int pic_field_poc[2], int *pic_poc,
         field_poc[1] = poc;
     }
 
+    if (   field_poc[0] != (int)field_poc[0]
+        || field_poc[1] != (int)field_poc[1])
+        return AVERROR_INVALIDDATA;
+
     if (picture_structure != PICT_BOTTOM_FIELD)
         pic_field_poc[0] = field_poc[0];
     if (picture_structure != PICT_TOP_FIELD)
@@ -337,7 +364,7 @@ static int decode_extradata_ps(const uint8_t *data, int size, H264ParamSets *ps,
     H2645Packet pkt = { 0 };
     int i, ret = 0;
 
-    ret = ff_h2645_packet_split(&pkt, data, size, logctx, is_avc, 2, AV_CODEC_ID_H264, 1);
+    ret = ff_h2645_packet_split(&pkt, data, size, logctx, is_avc, 2, AV_CODEC_ID_H264, 1, 0);
     if (ret < 0) {
         ret = 0;
         goto fail;
@@ -410,10 +437,9 @@ static int decode_extradata_ps_mp4(const uint8_t *buf, int buf_size, H264ParamSe
         escaped_buf_size = bytestream2_tell_p(&pbc);
         AV_WB16(escaped_buf, escaped_buf_size - 2);
 
-        ret = decode_extradata_ps(escaped_buf, escaped_buf_size, ps, 1, logctx);
+        (void)decode_extradata_ps(escaped_buf, escaped_buf_size, ps, 1, logctx);
+        // lorex.mp4 decodes ok even with extradata decoding failing
         av_freep(&escaped_buf);
-        if (ret < 0)
-            return ret;
     }
 
     return 0;
@@ -488,18 +514,31 @@ int ff_h264_decode_extradata(const uint8_t *data, int size, H264ParamSets *ps,
  */
 int ff_h264_get_profile(const SPS *sps)
 {
-    int profile = sps->profile_idc;
+    return avpriv_h264_get_profile(sps->profile_idc, sps->constraint_set_flags);
+}
 
-    switch (sps->profile_idc) {
+/**
+ * Compute profile from profile_idc and constraint_set?_flags.
+ *
+ * @param profile_idc profile_idc field from SPS
+ * @param constraint_set_flags constraint_set_flags field from SPS
+ *
+ * @return profile as defined by FF_PROFILE_H264_*
+ */
+int avpriv_h264_get_profile(int profile_idc, int constraint_set_flags)
+{
+    int profile = profile_idc;
+
+    switch (profile_idc) {
     case FF_PROFILE_H264_BASELINE:
         // constraint_set1_flag set to 1
-        profile |= (sps->constraint_set_flags & 1 << 1) ? FF_PROFILE_H264_CONSTRAINED : 0;
+        profile |= (constraint_set_flags & 1 << 1) ? FF_PROFILE_H264_CONSTRAINED : 0;
         break;
     case FF_PROFILE_H264_HIGH_10:
     case FF_PROFILE_H264_HIGH_422:
     case FF_PROFILE_H264_HIGH_444_PREDICTIVE:
         // constraint_set3_flag set to 1
-        profile |= (sps->constraint_set_flags & 1 << 3) ? FF_PROFILE_H264_INTRA : 0;
+        profile |= (constraint_set_flags & 1 << 3) ? FF_PROFILE_H264_INTRA : 0;
         break;
     }
 

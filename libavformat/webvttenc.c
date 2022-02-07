@@ -49,8 +49,8 @@ static void webvtt_write_time(AVIOContext *pb, int64_t millisec)
     hour = min / 60;
     min -= 60 * hour;
 
-    if (hour > 0)
-        avio_printf(pb, "%"PRId64":", hour);
+//PLEX    if (hour > 0)
+        avio_printf(pb, "%02"PRId64":", hour);
 
     avio_printf(pb, "%02"PRId64":%02"PRId64".%03"PRId64"", min, sec, millisec);
 }
@@ -74,6 +74,9 @@ static int webvtt_write_header(AVFormatContext *ctx)
     avio_printf(pb, "X-TIMESTAMP-MAP=LOCAL:");
     webvtt_write_time(pb, priv->sync_vtt * 1000);
     avio_printf(pb, ",MPEGTS:%02"PRId64"\n", priv->sync_mpeg);
+    // Tizen require an additional newline separator to separate the file magic
+    // from the rest of the body.
+    avio_printf(pb, "\n");
     //PLEX
     avio_flush(pb);
 

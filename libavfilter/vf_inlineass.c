@@ -48,14 +48,18 @@ typedef struct {
     double font_scale;
     double font_size;
     int margin;
+    int atsc_cc;
+    char *language;
 
     FFDrawContext draw;
 
-    AVCodec *dec;
+    int got_header;
 
     int mangle_state;
     float vs_rgb2yuv[3][4];
     float vs2rgb[3][4];
+
+    AVCodecContext *atsc_dec;
 } AssContext;
 
 #define OFFSET(x) offsetof(AssContext, x)
@@ -114,6 +118,36 @@ static av_cold int init(AVFilterContext *ctx)
         return AVERROR(EINVAL);
     }
 
+    if (ass->language)
+        ass->track->Language = strdup(ass->language);
+
+    if (ass->atsc_cc) {
+        AVDictionary *options = NULL;
+        int ret;
+        AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_EIA_608);
+        if (!codec) {
+            av_log(ctx, AV_LOG_ERROR, "failed to find EIA-608 decoder\n");
+            return AVERROR_DECODER_NOT_FOUND;
+        }
+
+        if (!(ass->atsc_dec = avcodec_alloc_context3(codec))) {
+            av_log(ctx, AV_LOG_ERROR, "failed to allocate EIA-608 decoder\n");
+            return AVERROR(ENOMEM);
+        }
+
+        av_dict_set(&options, "sub_text_format", "ass", 0);
+        av_dict_set(&options, "real_time", "1", 0);
+
+        if ((ret = avcodec_open2(ass->atsc_dec, codec, &options)) < 0) {
+            av_log(ctx, AV_LOG_ERROR, "failed to open EIA-608 decoder: %i\n", ret);
+            return ret;
+        }
+
+        av_dict_free(&options);
+
+        avfilter_inlineass_set_fonts(ctx);
+    }
+
     ass->mangle_state = 0;
 
     return 0;
@@ -144,6 +178,9 @@ static int config_input(AVFilterLink *link)
     ass_set_frame_size(context->renderer, link->w, link->h);
 
     ass_set_pixel_aspect(context->renderer, av_q2d(link->sample_aspect_ratio));
+
+    if (context->atsc_dec)
+        context->atsc_dec->pkt_timebase = link->time_base;
 
     return 0;
 }
@@ -418,8 +455,8 @@ static void mp_map_int_color(float matrix[3][4], int clip_bits, int c[3])
 // From mpv
 static void calculate_mangle_table(AssContext *ass, AVFrame *frame)
 {
-    int out_csp = av_frame_get_colorspace(frame);
-    int out_levels = av_frame_get_color_range(frame);
+    int out_csp = frame->colorspace;
+    int out_levels = frame->color_range;
     int csp = 0;
     int levels = 0;
     const ASS_Track *track = ass->track;
@@ -535,6 +572,44 @@ static void overlay_ass_image(AssContext *ass, AVFrame *picref,
     }
 }
 
+static int handle_atsc_cc(AVFilterLink *inlink, AVFrame *picref)
+{
+    AVFrameSideData *sd = av_frame_get_side_data(picref, AV_FRAME_DATA_A53_CC);
+    AVFilterContext *ctx = inlink->dst;
+    AssContext *ass = ctx->priv;
+
+    if (!sd)
+        return 0;
+
+    int ret = 0;
+    AVPacket pkt = {0};
+    AVSubtitle sub = {0};
+    int got_output = 0;
+
+    av_init_packet(&pkt);
+    if (!(pkt.buf = av_buffer_ref(sd->buf)))
+        return AVERROR(ENOMEM);
+    pkt.data = sd->data;
+    pkt.size = sd->size;
+    pkt.pts  = picref->pts;
+
+    if (avcodec_decode_subtitle2(ass->atsc_dec, &sub, &got_output, &pkt) < 0)
+        goto fail;
+
+    if (!got_output)
+        goto fail;
+
+    ass_flush_events(ass->track);
+
+    avfilter_inlineass_append_data(ctx, ass->atsc_dec, &sub);
+
+fail:
+    av_frame_remove_side_data(picref, AV_FRAME_DATA_A53_CC);
+    av_packet_unref(&pkt);
+    avsubtitle_free(&sub);
+    return ret;
+}
+
 static int filter_frame(AVFilterLink *inlink, AVFrame *picref)
 {
     AVFilterContext *ctx = inlink->dst;
@@ -546,6 +621,9 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *picref)
     if (!ass->mangle_state) {
         calculate_mangle_table(ass, picref);
     }
+
+    if (ass->atsc_dec)
+        handle_atsc_cc(inlink, picref);
 
     image = ass_render_frame(ass->renderer, ass->track, time_ms, NULL);
 
@@ -608,8 +686,7 @@ void avfilter_inlineass_set_fonts(AVFilterContext *context)
     ass_set_fonts(ass->renderer, ass->font_path, "DejaVu Sans", 1, ass->fc_file, 1);
 }
 
-void avfilter_inlineass_process_header(AVFilterContext *link,
-                                       AVCodecContext *dec_ctx)
+static void process_header(AVFilterContext *link, AVCodecContext *dec_ctx)
 {
     AssContext *ass = link->priv;
     ASS_Track *track = ass->track;
@@ -622,24 +699,9 @@ void avfilter_inlineass_process_header(AVFilterContext *link,
         ass_process_codec_private(track, dec_ctx->extradata,
                                   dec_ctx->extradata_size);
     } else {
-        AVDictionary *codec_opts = NULL;
         ASS_Style *style = NULL;
         int sid = 0;
-        const AVCodecDescriptor *dec_desc = avcodec_descriptor_get(codecID);
 
-        if (!dec_desc || !(dec_desc->props & AV_CODEC_PROP_TEXT_SUB)) {
-            av_log(link, AV_LOG_ERROR,
-                   "Only text based subtitles are currently supported\n");
-            return;
-        }
-
-        ass->dec = avcodec_find_decoder(codecID);
-        if(avcodec_open2(dec_ctx, ass->dec, &codec_opts) < 0){
-            av_log(link, AV_LOG_ERROR,
-                   "avcodec_open2 failed\n");
-            ass->dec = NULL;
-            return;
-        }
         /* Decode subtitles and push them into the renderer (libass) */
         if (dec_ctx->subtitle_header)
             ass_process_codec_private(track,
@@ -671,49 +733,27 @@ void avfilter_inlineass_process_header(AVFilterContext *link,
 
         track->default_style = sid;
     }
+
+    ass->got_header = 1;
 }
 
-void avfilter_inlineass_append_data(AVFilterContext *link, AVStream *stream,
-                                    AVPacket *pkt)
+void avfilter_inlineass_append_data(AVFilterContext *link, AVCodecContext *dec_ctx,
+                                    AVSubtitle *sub)
 {
-    AVCodecContext *dec_ctx = stream->codec;
     AssContext *ass = link->priv;
-    ASS_Track *track = ass->track;
-    enum AVCodecID codecID = dec_ctx->codec_id;
-    int64_t pts = av_rescale_q(pkt->pts, stream->time_base, ASS_TIME_BASE);
-    int64_t duration = av_rescale_q(pkt->duration, stream->time_base, ASS_TIME_BASE);
+    int i;
 
-    if (codecID == AV_CODEC_ID_ASS) {
-        ass_process_chunk(track, pkt->data, pkt->size, pts, duration);
-    } else {
-        int ret;
-        if (ass->dec && pkt) {
-            int i, got_subtitle;
-            AVSubtitle sub = {0};
-            // Clamp PTS's to 0; avoids potential negative-timed subtitles
-            // which cause some interesting casting issues
-            if (pkt->pts < 0)
-                pkt->pts = 0;
-            if (pkt->dts < 0)
-                pkt->dts = 0;
-            ret = avcodec_decode_subtitle2(dec_ctx, &sub, &got_subtitle, pkt);
-            if (ret < 0) {
-                av_log(link, AV_LOG_WARNING, "Error decoding: %s (ignored)\n",
-                       av_err2str(ret));
-            } else if ((int32_t)sub.start_display_time < 0 || (int32_t)sub.end_display_time < 0) {
-                // We could still have the output subtitle have negative display times
-                // if the decoder ignores the PTS and instead looks at an embedded timestamp
-                av_log(link, AV_LOG_WARNING, "Subtitle had negative timestamps: %u, %u; ignoring\n",
-                       sub.start_display_time, sub.end_display_time);
-            } else if (got_subtitle) {
-                for (i = 0; i < sub.num_rects; i++) {
-                    char *ass_line = sub.rects[i]->ass;
-                    if (!ass_line)
-                        break;
-                    ass_process_data(ass->track, ass_line, strlen(ass_line));
-                }
-            }
-        }
+    if (!ass->got_header)
+        process_header(link, dec_ctx);
+
+    for (i = 0; i < sub->num_rects; i++) {
+        int64_t duration = sub->end_display_time - sub->start_display_time;
+        int64_t start = av_rescale_q(sub->pts, AV_TIME_BASE_Q, ASS_TIME_BASE);
+        start        += sub->start_display_time;
+        char *ass_line = sub->rects[i]->ass;
+        if (!ass_line)
+            break;
+        ass_process_chunk(ass->track, ass_line, strlen(ass_line), start, duration);
     }
 }
 
@@ -724,6 +764,8 @@ static const AVOption inlineass_options[] = {
     {"margin",         "default margin",                   OFFSET(margin),     AV_OPT_TYPE_INT64,  {.i64 = 20  }, INT64_MIN, INT64_MAX,FLAGS},
     {"fonts_dir",      "directory to scan for fonts",      OFFSET(fonts_dir),  AV_OPT_TYPE_STRING, {.str = NULL}, CHAR_MIN,  CHAR_MAX, FLAGS},
     {"fontconfig_file","fontconfig file to load",          OFFSET(fc_file),    AV_OPT_TYPE_STRING, {.str = NULL}, CHAR_MIN,  CHAR_MAX, FLAGS},
+    {"atsc_cc",        "burn ATSC closed captions",        OFFSET(atsc_cc),    AV_OPT_TYPE_BOOL,   {.i64 = 0   }, 0,         1,        FLAGS},
+    {"language",       "default language",                 OFFSET(language),   AV_OPT_TYPE_STRING, {.str = NULL}, CHAR_MIN,  CHAR_MAX, FLAGS},
     {NULL},
 };
 

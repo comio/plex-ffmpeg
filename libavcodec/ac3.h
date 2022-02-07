@@ -27,7 +27,10 @@
 #ifndef AVCODEC_AC3_H
 #define AVCODEC_AC3_H
 
+#include "config.h"
+
 #define AC3_MAX_CODED_FRAME_SIZE 3840 /* in bytes */
+#define EAC3_MAX_CHANNELS 16          /**< maximum number of channels in EAC3 */
 #define AC3_MAX_CHANNELS 7            /**< maximum number of channels, including coupling channel */
 #define CPL_CH 0                      /**< coupling channel index */
 

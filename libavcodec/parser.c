@@ -20,48 +20,28 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include <inttypes.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "libavutil/avassert.h"
-#include "libavutil/atomic.h"
 #include "libavutil/internal.h"
 #include "libavutil/mem.h"
 
 #include "internal.h"
 #include "parser.h"
 
-static AVCodecParser *av_first_parser = NULL;
-
-AVCodecParser *av_parser_next(const AVCodecParser *p)
-{
-    if (p) {
-        return p->next;
-    } else {
-        ff_avcodec_scan_new_things();
-        return av_first_parser;
-    }
-}
-
-void av_register_codec_parser(AVCodecParser *parser)
-{
-    do {
-        parser->next = av_first_parser;
-    } while (parser->next != avpriv_atomic_ptr_cas((void * volatile *)&av_first_parser, parser->next, parser));
-}
-
 AVCodecParserContext *av_parser_init(int codec_id)
 {
     AVCodecParserContext *s = NULL;
-    AVCodecParser *parser;
+    const AVCodecParser *parser;
+    void *i = 0;
     int ret;
 
     if (codec_id == AV_CODEC_ID_NONE)
         return NULL;
 
-    ff_avcodec_scan_new_things();
-
-    for (parser = av_first_parser; parser; parser = parser->next) {
+    while ((parser = av_parser_iterate(&i))) {
         if (parser->codec_ids[0] == codec_id ||
             parser->codec_ids[1] == codec_id ||
             parser->codec_ids[2] == codec_id ||
@@ -75,7 +55,7 @@ found:
     s = av_mallocz(sizeof(AVCodecParserContext));
     if (!s)
         goto err_out;
-    s->parser = parser;
+    s->parser = (AVCodecParser*)parser;
     s->priv_data = av_mallocz(parser->priv_data_size);
     if (!s->priv_data)
         goto err_out;
@@ -189,6 +169,16 @@ int av_parser_parse2(AVCodecParserContext *s, AVCodecContext *avctx,
 #define FILL(name) if(s->name > 0 && avctx->name <= 0) avctx->name = s->name
     if (avctx->codec_type == AVMEDIA_TYPE_VIDEO) {
         FILL(field_order);
+//PLEX
+        FILL(width);
+        FILL(height);
+        FILL(coded_width);
+        FILL(coded_height);
+
+        if (s->picture_structure == AV_PICTURE_STRUCTURE_TOP_FIELD ||
+            s->picture_structure == AV_PICTURE_STRUCTURE_BOTTOM_FIELD)
+            avctx->separate_fields = 1;
+//PLEX
     }
 
     /* update the file pointer */
@@ -255,7 +245,7 @@ int ff_combine_frame(ParseContext *pc, int next,
                      const uint8_t **buf, int *buf_size)
 {
     if (pc->overread) {
-        ff_dlog(NULL, "overread %d, state:%X next:%d index:%d o_index:%d\n",
+        ff_dlog(NULL, "overread %d, state:%"PRIX32" next:%d index:%d o_index:%d\n",
                 pc->overread, pc->state, next, pc->index, pc->overread_index);
         ff_dlog(NULL, "%X %X %X %X\n",
                 (*buf)[0], (*buf)[1], (*buf)[2], (*buf)[3]);
@@ -288,6 +278,8 @@ int ff_combine_frame(ParseContext *pc, int next,
         return -1;
     }
 
+    av_assert0(next >= 0 || pc->buffer);
+
     *buf_size          =
     pc->overread_index = pc->index + next;
 
@@ -318,7 +310,7 @@ int ff_combine_frame(ParseContext *pc, int next,
     }
 
     if (pc->overread) {
-        ff_dlog(NULL, "overread %d, state:%X next:%d index:%d o_index:%d\n",
+        ff_dlog(NULL, "overread %d, state:%"PRIX32" next:%d index:%d o_index:%d\n",
                 pc->overread, pc->state, next, pc->index, pc->overread_index);
         ff_dlog(NULL, "%X %X %X %X\n",
                 (*buf)[0], (*buf)[1], (*buf)[2], (*buf)[3]);

@@ -25,22 +25,21 @@
 #include "libavutil/avstring.h"
 
 typedef struct FFLibrary {
-    int is_master; // 0 for a component lib, 1 for e.g. libavcodec proper
+    int is_master; // deprecated
     char *loaded_dso_list;
     void (*av_vlog)(void *avcl, int level, const char *fmt, va_list vl);
     char const *(*av_version_info)(void);
 
     // libavcodec (NULL for other libs)
     unsigned (*avcodec_version)(void);
-    void (*av_register_codec_parser)(struct AVCodecParser *parser);
     void (*avcodec_register)(struct AVCodec *codec);
-    void (*av_register_hwaccel)(struct AVHWAccel *hwaccel);
-    struct AVHWAccel *(*av_hwaccel_next)(const struct AVHWAccel *hwaccel);
 } FFLibrary;
 
 typedef int (*AVInitLibrary)(FFLibrary* lib, int level);
 
 int av_init_library(FFLibrary* lib, int level);
+void av_set_needs_rescan(void);
+void av_set_extlibs_path(const char *inp);
 
 void avpriv_load_new_libs(FFLibrary* lib);
 

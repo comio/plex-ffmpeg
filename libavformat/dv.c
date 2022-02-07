@@ -534,7 +534,7 @@ static int dv_read_header(AVFormatContext *s)
                                (AVRational) { 8, 1 },
                                c->dv_demux->sys->time_base);
 
-    if (s->pb->seekable)
+    if (s->pb->seekable & AVIO_SEEKABLE_NORMAL)
         dv_read_timecode(s);
 
     return 0;
@@ -587,7 +587,7 @@ static int dv_read_close(AVFormatContext *s)
     return 0;
 }
 
-static int dv_probe(AVProbeData *p)
+static int dv_probe(const AVProbeData *p)
 {
     unsigned marker_pos = 0;
     int i;
